@@ -1,5 +1,7 @@
 # Gradle / Android build outputs
 .gradle/
+.build-tools/
+build.log
 .kotlin/
 build/
 */build/
