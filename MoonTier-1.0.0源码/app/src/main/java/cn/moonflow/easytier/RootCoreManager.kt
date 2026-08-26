@@ -86,29 +86,53 @@ class RootCoreManager(private val context: Context) {
         target: File,
         onProgress: (Int, Int) -> Unit
     ) {
-        val url = "https://github.com/EasyTier/EasyTier/releases/download/$tag/easytier-linux-aarch64-$tag.zip"
-        val connection = URL(url).openConnection() as HttpURLConnection
-        connection.connectTimeout = 10000
-        connection.readTimeout = 30000
-        connection.instanceFollowRedirects = true
-        val total = connection.contentLengthLong
-        connection.inputStream.use { input ->
-            FileOutputStream(target).use { output ->
-                val buffer = ByteArray(64 * 1024)
-                var read: Int
-                var written = 0L
-                while (input.read(buffer).also { read = it } != -1) {
-                    output.write(buffer, 0, read)
-                    written += read
-                    if (total > 0) {
-                        onProgress(
-                            (written * 100 / total).toInt().coerceIn(0, 100),
-                            (total / 1024).toInt()
-                        )
+        val original = "https://github.com/EasyTier/EasyTier/releases/download/$tag/easytier-linux-aarch64-$tag.zip"
+        val urls = DOWNLOAD_MIRRORS.map { it + original } + original
+        val errors = ArrayList<String>()
+        for (url in urls) {
+            val part = File(target.parentFile, target.name + ".part")
+            part.delete()
+            try {
+                val connection = URL(url).openConnection() as HttpURLConnection
+                connection.connectTimeout = 10000
+                connection.readTimeout = 30000
+                connection.instanceFollowRedirects = true
+                connection.requestMethod = "GET"
+                val code = connection.responseCode
+                if (code !in 200..299) throw IllegalStateException("HTTP $code")
+                val total = connection.contentLengthLong
+                connection.inputStream.use { input ->
+                    FileOutputStream(part).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        var read: Int
+                        var written = 0L
+                        while (input.read(buffer).also { read = it } != -1) {
+                            output.write(buffer, 0, read)
+                            written += read
+                            if (total > 0) onProgress((written * 100 / total).toInt().coerceIn(0, 100), (total / 1024).toInt())
+                        }
                     }
                 }
+                if (part.length() == 0L) throw IllegalStateException("empty response")
+                ZipFile(part).use { archive ->
+                    val names = buildList {
+                        val entries = archive.entries()
+                        while (entries.hasMoreElements()) add(entries.nextElement().name.replace('\\', '/'))
+                    }
+                    if (names.none { it == "easytier-core" || it.endsWith("/easytier-core") } || names.none { it == "easytier-cli" || it.endsWith("/easytier-cli") }) {
+                        throw IllegalStateException("response is not an EasyTier release ZIP")
+                    }
+                }
+                if (!part.renameTo(target)) throw IllegalStateException("cannot finalize downloaded file")
+                AppDiagnostics.info("root", "EasyTier 下载源成功: ${URL(url).host}")
+                return
+            } catch (error: Exception) {
+                errors += "${runCatching { URL(url).host }.getOrDefault(url)}: ${error.message ?: error.javaClass.simpleName}"
+                part.delete()
+                AppDiagnostics.warn("root", "EasyTier 下载源失败: ${errors.last()}")
             }
         }
+        throw IllegalStateException("所有下载源均失败：${errors.joinToString("；")}")
     }
 
     private fun extractRelease(zip: File) {
@@ -213,5 +237,10 @@ class RootCoreManager(private val context: Context) {
 
     companion object {
         private const val MANAGER_CLIENT_VERSION = "1"
+        private val DOWNLOAD_MIRRORS = arrayOf(
+            "https://ghfast.top/",
+            "https://gh-proxy.com/",
+            "https://mirror.ghproxy.com/"
+        )
     }
 }

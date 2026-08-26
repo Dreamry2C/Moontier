@@ -20,6 +20,11 @@ class ConfigStore(private val context: Context) {
     private val officialServersFile = File(context.filesDir, "official_servers.json")
     private val settingsFile = File(context.filesDir, "settings.json")
 
+    init {
+        // Remove the legacy built-in official server cache on every startup.
+        officialServersFile.delete()
+    }
+
     @Synchronized
     fun loadConfigs(): List<NetworkConfig> {
         val raw = readJsonArray(configsFile)
@@ -110,7 +115,8 @@ class ConfigStore(private val context: Context) {
             configServerHostname = settings.configServerHostname,
             configServerMachineId = settings.configServerMachineId,
             configServerSecureMode = settings.configServerSecureMode,
-            configServerAutoConnect = settings.configServerAutoConnect
+            configServerAutoConnect = settings.configServerAutoConnect,
+            bootAutoStart = settings.bootAutoStart
         )
         writeTextAtomic(settingsFile, merged.toJson().toString(2))
     }
@@ -122,22 +128,20 @@ class ConfigStore(private val context: Context) {
     fun saveUserServers(servers: List<ServerEntry>) = saveServerFile(userServersFile, servers)
 
     @Synchronized
-    fun loadOfficialServers(): List<ServerEntry> = loadServerFile(officialServersFile)
+    fun loadOfficialServers(): List<ServerEntry> {
+        officialServersFile.delete()
+        return emptyList()
+    }
 
     @Synchronized
-    fun saveOfficialServers(servers: List<ServerEntry>) = saveServerFile(officialServersFile, servers)
+    fun saveOfficialServers(servers: List<ServerEntry>) {
+        officialServersFile.delete()
+    }
 
-    suspend fun syncOfficialServers(source: String = OFFICIAL_SOURCE): SyncResult =
+    suspend fun syncOfficialServers(source: String = ""): SyncResult =
         withContext(Dispatchers.IO) {
-            val text = fetchServerText(source)
-            val addresses = parseServerAddresses(text)
-            val servers = addresses.map { ServerEntry(serverNameFromAddress(it), it) }
-            saveOfficialServers(servers)
-            SyncResult(
-                true,
-                servers.size,
-                if (servers.isEmpty()) "官方源没有返回服务器" else "官方服务器列表已刷新"
-            )
+            officialServersFile.delete()
+            SyncResult(false, 0, "官方服务器已移除，请使用用户收藏或自定义 TXT 源")
         }
 
     suspend fun downloadUserServers(source: String): SyncResult =
@@ -378,5 +382,3 @@ data class SyncResult(
     val count: Int,
     val message: String
 )
-
-private const val OFFICIAL_SOURCE = "etserverlist.225284.xyz"

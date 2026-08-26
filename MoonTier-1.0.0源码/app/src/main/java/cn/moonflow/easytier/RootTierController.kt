@@ -942,7 +942,7 @@ class RootTierController(private val context: Context) {
 
     private fun requireRootAndCore() {
         if (!RootManager.probe().available) {
-            throw IllegalStateException("未检测到 root，请先在 Root 管理器中授权 MoonTier（KernelSU/Magisk/APatch）")
+            throw IllegalStateException("未检测到 root，请确认系统、厂商或 Root 管理器已授权 MoonTier")
         }
         if (!coreManager.isReady()) {
             throw IllegalStateException("尚未下载官方 easytier-core，或管理客户端缺失")

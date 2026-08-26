@@ -223,7 +223,7 @@ fun nextServerNameFromNames(existingNames: Collection<String>, base: String = "E
 }
 
 data class AppSettings(
-    val autoSyncOfficialServers: Boolean = true,
+    val autoSyncOfficialServers: Boolean = false,
     val exitNodeAutoRoutes: Boolean = false,
     val darkMode: Boolean = false,
     val rootModeEnabled: Boolean = false,
@@ -233,7 +233,8 @@ data class AppSettings(
     val configServerHostname: String = "",
     val configServerMachineId: String = "",
     val configServerSecureMode: Boolean = true,
-    val configServerAutoConnect: Boolean = false
+    val configServerAutoConnect: Boolean = false,
+    val bootAutoStart: Boolean = false
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("auto_sync_official_servers", autoSyncOfficialServers)
@@ -247,10 +248,11 @@ data class AppSettings(
         .put("config_server_machine_id", configServerMachineId)
         .put("config_server_secure_mode", configServerSecureMode)
         .put("config_server_auto_connect", configServerAutoConnect)
+        .put("boot_auto_start", bootAutoStart)
 
     companion object {
         fun fromJson(obj: JSONObject): AppSettings = AppSettings(
-            autoSyncOfficialServers = obj.optBoolean("auto_sync_official_servers", true),
+            autoSyncOfficialServers = false,
             exitNodeAutoRoutes = obj.optBoolean("exit_node_auto_routes", false),
             darkMode = obj.optBoolean("dark_mode", false),
             rootModeEnabled = obj.optBoolean("root_mode_enabled", false),
@@ -260,7 +262,8 @@ data class AppSettings(
             configServerHostname = obj.optString("config_server_hostname", ""),
             configServerMachineId = obj.optString("config_server_machine_id", ""),
             configServerSecureMode = obj.optBoolean("config_server_secure_mode", true),
-            configServerAutoConnect = obj.optBoolean("config_server_auto_connect", false)
+            configServerAutoConnect = obj.optBoolean("config_server_auto_connect", false),
+            bootAutoStart = obj.optBoolean("boot_auto_start", false)
         )
     }
 }
