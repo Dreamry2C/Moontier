@@ -365,7 +365,7 @@ private fun MoonTierApp(
     var nodesExpanded by remember { mutableStateOf(false) }
     var configs by remember { mutableStateOf(store.loadConfigs()) }
     var userServers by remember { mutableStateOf(store.loadUserServers()) }
-    var officialServers by remember { mutableStateOf(store.loadOfficialServers()) }
+    var officialServers by remember { mutableStateOf(emptyList<ServerEntry>()) }
     var selectedTab by remember { mutableIntStateOf(0) }
     var editingConfig by remember { mutableStateOf<NetworkConfig?>(null) }
     var dialog by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -384,7 +384,7 @@ private fun MoonTierApp(
             rootSelectedConfigId = configs.firstOrNull { it.isDefault }?.id ?: configs.firstOrNull()?.id.orEmpty()
         }
         userServers = store.loadUserServers()
-        officialServers = store.loadOfficialServers()
+        officialServers = emptyList()
         settings = store.loadSettings()
     }
 
@@ -437,10 +437,6 @@ private fun MoonTierApp(
 
     LaunchedEffect(Unit) {
         controller.attachIfRunning(configs)
-        if (settings.autoSyncOfficialServers) {
-            runCatching { store.syncOfficialServers() }
-                .onSuccess { officialServers = store.loadOfficialServers() }
-        }
     }
 
     LaunchedEffect(Unit) {
@@ -1627,57 +1623,6 @@ private fun ServersPage(
         }
         item {
             QCard(palette) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text("官方服务器列表", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                        Text("${officialServers.size} 个服务器", color = palette.subText, fontSize = 12.sp)
-                    }
-                    ExpandArrow(officialOpen, palette) { officialOpen = !officialOpen }
-                }
-                AnimatedVisibility(
-                    visible = officialOpen,
-                    enter = expandVertically(animationSpec = tween(220)) + fadeIn(tween(160)),
-                    exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(120))
-                ) {
-                    Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        QButton(
-                            "立即同步公共服务器",
-                            palette,
-                            Modifier.fillMaxWidth(),
-                            primary = false,
-                            icon = Icons.Rounded.Storage,
-                            onClick = onSyncOfficial
-                        )
-                        officialServers.ifEmpty { listOf(ServerEntry("暂无官方服务器", "")) }.forEach { server ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(palette.surfaceVariant)
-                                    .padding(10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(serverNameFromAddress(server.address), color = palette.text, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                                if (server.address.isNotBlank()) {
-                                    IconButton(onClick = { onAddOfficialServer(server) }) {
-                                        Icon(Icons.Rounded.Add, null, tint = palette.text)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        item {
-            QCard(palette) {
                 Text("TXT 下载到用户收藏", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 Spacer(Modifier.height(10.dp))
                 QTextField(source, "域名或 https:// 文本地址", palette, onValueChange = { source = it })
@@ -1723,7 +1668,7 @@ private fun SettingsPage(
         contentPadding = PaddingValues(top = 14.dp, bottom = 26.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        item { Header("设置", "运行模式与官方核心", palette) }
+        item { Header("设置", "运行模式与核心管理", palette) }
         item {
             QCard(palette) {
                 Text("运行模式", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
@@ -1749,7 +1694,7 @@ private fun SettingsPage(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         StatusDot(if (rootAvailable) palette.success else palette.error)
                         Text(
-                            if (rootAvailable) "Root可用" else "未检测到 Root 管理器",
+                            if (rootAvailable) "Root可用" else "未检测到可用 Root",
                             color = if (rootAvailable) palette.success else palette.error,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium
@@ -1770,7 +1715,7 @@ private fun SettingsPage(
                     if (!rootAvailable) {
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "请先在 Root 管理器中授权 MoonTier（KernelSU/Magisk/APatch），再重新检测。",
+                            "请确认系统、厂商或 Root 管理器已授权 MoonTier，再重新检测。",
                             color = palette.subText,
                             fontSize = 12.sp,
                             lineHeight = 18.sp
@@ -1781,8 +1726,8 @@ private fun SettingsPage(
         }
         item {
             QCard(palette) {
-                SwitchRow("自动同步官方服务器", settings.autoSyncOfficialServers, palette) {
-                    onSettings(settings.copy(autoSyncOfficialServers = it))
+                SwitchRow("开机自动恢复 Root 网络", settings.bootAutoStart, palette) {
+                    onSettings(settings.copy(bootAutoStart = it))
                 }
                 SwitchRow("深色模式", settings.darkMode, palette) {
                     onSettings(settings.copy(darkMode = it))
@@ -2184,9 +2129,6 @@ private fun ConfigEditorScreenV2(
                 ) {
                     QButton("从收藏", palette, Modifier.weight(1f), primary = false, enabled = userServers.any { it.address.isNotBlank() }) {
                         serverPicker = ServerPickerState("用户收藏", userServers)
-                    }
-                    QButton("从官方", palette, Modifier.weight(1f), primary = false, enabled = officialServers.any { it.address.isNotBlank() }) {
-                        serverPicker = ServerPickerState("官方服务器", officialServers)
                     }
                 }
             }

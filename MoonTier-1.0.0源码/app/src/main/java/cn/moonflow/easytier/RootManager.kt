@@ -13,8 +13,11 @@ data class ShellResult(
 data class RootProbe(
     val available: Boolean,
     val suPath: String,
-    val version: String = ""
+    val version: String = "",
+    val strategy: RootInvocationStrategy = RootInvocationStrategy.STANDARD_C
 )
+
+enum class RootInvocationStrategy { STANDARD_C, UID_SHELL_C, BUSYBOX_C }
 
 object RootManager {
     private val suCandidates = listOf(
@@ -46,23 +49,31 @@ object RootManager {
     fun isAvailable(): Boolean = probe().available
 
     fun su(command: String, timeoutMs: Long = 8000): ShellResult {
-        val suPath = probe().suPath
+        val detected = probe()
+        val suPath = detected.suPath
         if (suPath.isBlank()) return ShellResult(1, "未检测到 Root 管理器授权")
-        val cmd = if (suPath.endsWith("busybox")) {
-            listOf(suPath, "su", "-c", command)
-        } else {
-            listOf(suPath, "-c", command)
+        val cmd = when (detected.strategy) {
+            RootInvocationStrategy.BUSYBOX_C -> listOf(suPath, "su", "-c", command)
+            RootInvocationStrategy.UID_SHELL_C -> listOf(suPath, "0", "/system/bin/sh", "-c", command)
+            RootInvocationStrategy.STANDARD_C -> listOf(suPath, "-c", command)
         }
         return runProcess(cmd, timeoutMs)
     }
 
     private fun detect(): RootProbe {
         for (candidate in suCandidates) {
-            val base = if (candidate.endsWith("busybox")) listOf(candidate, "su") else listOf(candidate)
-            val idResult = runProcess(base + listOf("-c", "id"), 5000)
+            val busybox = candidate.endsWith("busybox")
+            val base = if (busybox) listOf(candidate, "su") else listOf(candidate)
+            val idResult = runProcess(base + listOf("-c", "id"), 8000)
             if (idResult.success && idResult.output.contains("uid=0")) {
                 val version = runProcess(base + listOf("--version"), 2500).output.trim()
-                return RootProbe(true, candidate, version)
+                return RootProbe(true, candidate, version, if (busybox) RootInvocationStrategy.BUSYBOX_C else RootInvocationStrategy.STANDARD_C)
+            }
+            if (!busybox) {
+                val vendorResult = runProcess(listOf(candidate, "0", "/system/bin/sh", "-c", "id"), 8000)
+                if (vendorResult.success && vendorResult.output.contains("uid=0")) {
+                    return RootProbe(true, candidate, "", RootInvocationStrategy.UID_SHELL_C)
+                }
             }
         }
         return RootProbe(false, "")
