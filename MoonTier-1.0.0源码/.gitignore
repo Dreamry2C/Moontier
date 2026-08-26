@@ -1,0 +1,23 @@
+# Gradle / Android build outputs
+.gradle/
+.kotlin/
+build/
+*/build/
+.cxx/
+.externalNativeBuild/
+tools/**/target/
+
+# Local IDE and machine state
+local.properties
+.idea/
+*.iml
+
+# Generated packages and reports
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.hprof
+*.log
+captures/
