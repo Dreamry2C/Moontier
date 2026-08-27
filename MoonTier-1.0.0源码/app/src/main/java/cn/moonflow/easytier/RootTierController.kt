@@ -434,8 +434,8 @@ class RootTierController(private val context: Context) {
                 throw IllegalStateException(managerError(result, "实例停止失败"))
             }
         } else {
-            File(configsDir, "$configId.toml").delete()
-            File(configsDir, "${safeId(configId)}.toml").delete()
+            val target = File(configsDir, "${safeId(configId)}.toml")
+            RootManager.su("rm -f ${shq(target.absolutePath)}", timeoutMs = 5000)
         }
         localMetaFile(configId).delete()
 
@@ -531,7 +531,6 @@ class RootTierController(private val context: Context) {
             append(shq(configsDir.absolutePath))
             append(" --rpc-portal ")
             append(shq(MANAGER_RPC_PORTAL))
-            append(" --daemon")
             if (options.configServerEnabled) {
                 append(" --config-server ")
                 append(shq(options.resolvedConfigServerUrl))
@@ -910,7 +909,18 @@ class RootTierController(private val context: Context) {
         val configs = store.loadConfigs().associateBy { it.id }
         loadLocalMetadata().forEach { (id, _) ->
             val config = configs[id] ?: return@forEach
-            File(configsDir, "$id.toml").writeText(TomlCodec.build(runtimeRootConfig(config)))
+            val stage = File(stagingDir, "restore-${safeId(id)}.toml")
+            val target = File(configsDir, "${safeId(id)}.toml")
+            stage.writeText(TomlCodec.build(runtimeRootConfig(config)))
+            try {
+                val result = RootManager.su(
+                    "cp ${shq(stage.absolutePath)} ${shq(target.absolutePath)} && chmod 644 ${shq(target.absolutePath)}",
+                    timeoutMs = 8000
+                )
+                if (!result.success) throw IllegalStateException("无法恢复 Root 配置: ${result.output}")
+            } finally {
+                stage.delete()
+            }
         }
     }
 
@@ -970,8 +980,32 @@ class RootTierController(private val context: Context) {
 
     private fun managerAlive(): Boolean = isAlive(managerPid())
 
-    private fun managerPid(): Long =
-        runCatching { managerPidFile.readText().trim().toLong() }.getOrDefault(0)
+    private fun managerPid(): Long {
+        val stored = runCatching { managerPidFile.readText().trim().toLong() }.getOrDefault(0)
+        if (isAlive(stored)) return stored
+        val discovered = discoverManagerPid()
+        if (discovered > 0) {
+            runCatching { managerPidFile.writeText(discovered.toString()) }
+            AppDiagnostics.info("root", "recovered shared manager pid=$discovered")
+        }
+        return discovered
+    }
+
+    private fun discoverManagerPid(): Long {
+        val command = buildString {
+            append("core=\u0024(readlink -f ")
+            append(shq(coreManager.coreFile.absolutePath))
+            append("); for proc in /proc/[0-9]*; do ")
+            append("exe=\u0024(readlink -f \"\u0024proc/exe\" 2>/dev/null); ")
+            append("[ \"\u0024exe\" = \"\u0024core\" ] || continue; ")
+            append("echo \u0024{proc##*/}; exit 0; ")
+            append("done; exit 1")
+        }
+        val result = RootManager.su(command, timeoutMs = 5000)
+        return if (result.success) result.output.lineSequence()
+            .mapNotNull { it.trim().toLongOrNull() }
+            .firstOrNull() ?: 0 else 0
+    }
 
     private fun isAlive(pid: Long): Boolean {
         if (pid <= 0) return false

@@ -42,18 +42,15 @@ class RootAutostartService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun notification(): Notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_data_sync)
-            .setContentTitle("MoonTier")
-            .setContentText("正在恢复 Root 网络")
-            .setOngoing(false)
-            .setPriority(Notification.PRIORITY_LOW)
-            .build()
-    } else {
-        @Suppress("DEPRECATION")
-        Notification.Builder(this)
-            .setSmallIcon(android.R.drawable.stat_sys_data_sync)
+    private fun notification(): Notification {
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        return builder
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("MoonTier")
             .setContentText("正在恢复 Root 网络")
             .setOngoing(false)
