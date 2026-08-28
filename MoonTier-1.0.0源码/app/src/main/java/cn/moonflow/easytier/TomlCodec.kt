@@ -12,7 +12,8 @@ object TomlCodec {
         if (config.hostname.isNotBlank()) out += "hostname = \"${esc(config.hostname)}\""
         out += "dhcp = ${config.dhcp}"
         if (!config.dhcp && config.ipv4.isNotBlank()) out += "ipv4 = \"${esc(config.ipv4)}\""
-        if (config.listenerUrls.isNotEmpty()) out += "listeners = ${array(config.listenerUrls)}"
+        // An omitted listener list makes EasyTier bind its default 11010 ports.
+        out += "listeners = ${array(config.listenerUrls)}"
         if (config.stunServers.isNotEmpty()) out += "stun_servers = ${array(config.stunServers)}"
         if (config.enableManualRoutes) out += "routes = ${array(config.routes)}"
         if (config.exitNodes.isNotEmpty()) out += "exit_nodes = ${array(config.exitNodes)}"

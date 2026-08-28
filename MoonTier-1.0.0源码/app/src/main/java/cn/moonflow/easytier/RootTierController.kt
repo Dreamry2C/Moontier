@@ -411,18 +411,39 @@ class RootTierController(private val context: Context) {
     private fun startBlocking(config: NetworkConfig): RefreshedState {
         requireRootAndCore()
         val options = loadManagerOptions() ?: optionsFromSettings(store.loadSettings(), enabled = false)
-        ensureManagerBlocking(options)
-
         val runtimeConfig = runtimeRootConfig(config)
         val stageFile = File(stagingDir, "${safeId(config.id)}.toml")
         stageFile.writeText(TomlCodec.build(runtimeConfig))
-        val result = runManager("run", stageFile.absolutePath, timeoutMs = 15000)
-        stageFile.delete()
-        if (!result.success) {
-            throw IllegalStateException(managerError(result, "实例启动失败"))
+        val managerWasAlive = managerAlive()
+        try {
+            if (!managerWasAlive) {
+                val target = File(configsDir, "${safeId(config.id)}.toml")
+                val copyResult = RootManager.su(
+                    "cp ${shq(stageFile.absolutePath)} ${shq(target.absolutePath)} && chmod 644 ${shq(target.absolutePath)}",
+                    timeoutMs = 8000
+                )
+                if (!copyResult.success) {
+                    throw IllegalStateException(copyResult.output.ifBlank { "无法准备 Root 配置" })
+                }
+                writeLocalMeta(config)
+                try {
+                    ensureManagerBlocking(options)
+                } catch (error: Exception) {
+                    localMetaFile(config.id).delete()
+                    RootManager.su("rm -f ${shq(target.absolutePath)}", timeoutMs = 5000)
+                    throw error
+                }
+            } else {
+                ensureManagerBlocking(options)
+                val result = runManager("run", stageFile.absolutePath, timeoutMs = 15000)
+                if (!result.success) {
+                    throw IllegalStateException(managerError(result, "实例启动失败"))
+                }
+                writeLocalMeta(config)
+            }
+        } finally {
+            stageFile.delete()
         }
-
-        writeLocalMeta(config)
         return refreshedState(queryManagerSnapshot(), options)
     }
 
@@ -749,9 +770,9 @@ class RootTierController(private val context: Context) {
         }
 
         val previousById = state.instances.associateBy { it.configId }
-        val localIds = localMeta.keys.filterTo(LinkedHashSet()) { id ->
-            snapshot.metas[id]?.source != CONFIG_SOURCE_WEB
-        }
+        // A config started through manager RPC may be reported as WEB source briefly.
+        // Persisted local metadata is the authoritative ownership marker.
+        val localIds = localMeta.keys.filterTo(LinkedHashSet()) { it in snapshot.instanceIds }
         val instances = snapshot.instanceIds
             .filter { it in localIds }
             .map { id ->
@@ -785,7 +806,7 @@ class RootTierController(private val context: Context) {
             }
 
         val managed = snapshot.instanceIds
-            .filter { id -> id !in localIds || snapshot.metas[id]?.source == CONFIG_SOURCE_WEB }
+            .filter { it !in localIds }
             .map { id ->
                 val meta = snapshot.metas[id]
                 val parsed = parseInstanceInfo(snapshot.runningInfo.optJSONObject(id))
@@ -1276,7 +1297,6 @@ class RootTierController(private val context: Context) {
             RegexOption.IGNORE_CASE
         )
         private const val MANAGER_RPC_PORTAL = "127.0.0.1:14999"
-        private const val CONFIG_SOURCE_WEB = 2
         private val CONFIG_SERVER_TOKEN_REGEX =
             Regex("((?:udp|tcp|ws|wss)://[^\\s/]+/)[^\\s]+", RegexOption.IGNORE_CASE)
     }

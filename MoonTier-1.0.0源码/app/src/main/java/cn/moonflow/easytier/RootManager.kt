@@ -1,7 +1,5 @@
 package cn.moonflow.easytier
 
-import java.util.concurrent.TimeUnit
-
 data class ShellResult(
     val exitCode: Int,
     val output: String,
@@ -96,9 +94,15 @@ object RootManager {
                 isDaemon = true
                 start()
             }
-            val finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            val deadlineNanos = System.nanoTime() + timeoutMs * 1_000_000
+            var finished = false
+            while (System.nanoTime() < deadlineNanos) {
+                finished = runCatching { process.exitValue() }.isSuccess
+                if (finished) break
+                Thread.sleep(50)
+            }
             if (!finished) {
-                process.destroyForcibly()
+                process.destroy()
                 return ShellResult(-1, "命令执行超时", timedOut = true)
             }
             reader.join(1000)
