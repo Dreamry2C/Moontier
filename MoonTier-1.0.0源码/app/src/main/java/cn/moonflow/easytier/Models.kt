@@ -235,7 +235,8 @@ data class AppSettings(
     val configServerSecureMode: Boolean = true,
     val configServerAutoConnect: Boolean = false,
     val bootAutoStart: Boolean = false,
-    val bootAdbEnabled: Boolean = false
+    val bootAdbEnabled: Boolean = false,
+    val keepAliveNotification: Boolean = false
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("auto_sync_official_servers", autoSyncOfficialServers)
@@ -251,6 +252,7 @@ data class AppSettings(
         .put("config_server_auto_connect", configServerAutoConnect)
         .put("boot_auto_start", bootAutoStart)
         .put("boot_adb_enabled", bootAdbEnabled)
+        .put("keep_alive_notification", keepAliveNotification)
 
     companion object {
         fun fromJson(obj: JSONObject): AppSettings = AppSettings(
@@ -266,7 +268,8 @@ data class AppSettings(
             configServerSecureMode = obj.optBoolean("config_server_secure_mode", true),
             configServerAutoConnect = obj.optBoolean("config_server_auto_connect", false),
             bootAutoStart = obj.optBoolean("boot_auto_start", false),
-            bootAdbEnabled = obj.optBoolean("boot_adb_enabled", false)
+            bootAdbEnabled = obj.optBoolean("boot_adb_enabled", false),
+            keepAliveNotification = obj.optBoolean("keep_alive_notification", false)
         )
     }
 }

@@ -117,7 +117,8 @@ class ConfigStore(private val context: Context) {
             configServerSecureMode = settings.configServerSecureMode,
             configServerAutoConnect = settings.configServerAutoConnect,
             bootAutoStart = settings.bootAutoStart,
-            bootAdbEnabled = settings.bootAdbEnabled
+            bootAdbEnabled = settings.bootAdbEnabled,
+            keepAliveNotification = settings.keepAliveNotification
         )
         writeTextAtomic(settingsFile, merged.toJson().toString(2))
     }
