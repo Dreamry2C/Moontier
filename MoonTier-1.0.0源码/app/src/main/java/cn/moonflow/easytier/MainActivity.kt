@@ -207,6 +207,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         store = ConfigStore(applicationContext)
         AppDiagnostics.initialize(applicationContext, store.loadSettings().coreLogLevel)
+        KeepAliveService.sync(applicationContext, store.loadSettings().keepAliveNotification)
         installUncaughtExceptionHandler()
         AppDiagnostics.event("launcher", "MainActivity created")
         controller = EasyTierController(applicationContext, store, ::requestVpn)
@@ -375,6 +376,7 @@ private fun MoonTierApp(
         mutableStateOf(configs.firstOrNull { it.isDefault }?.id ?: configs.firstOrNull()?.id.orEmpty())
     }
     val scope = rememberCoroutineScope()
+    val appContext = LocalContext.current.applicationContext
     val palette = if (settings.darkMode) Palette.Dark else Palette.Light
     val runtime = controller.state
 
@@ -399,6 +401,7 @@ private fun MoonTierApp(
         }
         settings = next
         store.saveSettings(next)
+        KeepAliveService.sync(appContext, next.keepAliveNotification)
         AppDiagnostics.configure(next.coreLogLevel)
         if (logLevelChanged) {
             controller.updateLogLevel(next.coreLogLevel)
@@ -1673,6 +1676,9 @@ private fun SettingsPage(
                     SwitchRow("开机开启无线 ADB (5555)", settings.bootAdbEnabled, palette) {
                         onSettings(settings.copy(bootAdbEnabled = it))
                     }
+                }
+                SwitchRow("增强保活通知", settings.keepAliveNotification, palette) {
+                    onSettings(settings.copy(keepAliveNotification = it))
                 }
             }
         }

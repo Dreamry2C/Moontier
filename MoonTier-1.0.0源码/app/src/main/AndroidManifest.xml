@@ -61,5 +61,15 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="root_network_restore" />
         </service>
+
+        <service
+            android:name=".KeepAliveService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="application_process_liveness" />
+        </service>
     </application>
 </manifest>
