@@ -1002,72 +1002,6 @@ private fun RootNetworkPage(
             }
         }
 
-        val configServerConfigured = isFullConfigServerUrl(rootState.configServer.serverUrl)
-        if (
-            configServerConfigured ||
-            rootState.configServer.running ||
-            rootState.configServer.starting ||
-            rootState.configServer.managedNetworks.isNotEmpty()
-        ) {
-            item {
-                QCard(palette) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("网页控制台", color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                when {
-                                    rootState.configServer.connected -> "已连接 · ${rootState.configServer.managedNetworks.size} 个下发网络"
-                                    rootState.configServer.running -> "正在连接配置服务器"
-                                    rootState.configServer.starting -> "正在启动"
-                                    rootState.configServer.managedNetworks.isNotEmpty() -> "配置服务器已断开 · ${rootState.configServer.managedNetworks.size} 个缓存网络仍在运行"
-                                    else -> rootState.configServer.error
-                                },
-                                color = if (rootState.configServer.connected) palette.success else palette.subText,
-                                fontSize = 12.sp
-                            )
-                        }
-                        if (rootState.configServer.running || rootState.configServer.starting) {
-                            QButton(
-                                text = "断开",
-                                palette = palette,
-                                modifier = Modifier.width(86.dp),
-                                compact = true,
-                                danger = true,
-                                onClick = { rootController.stopConfigServer() }
-                            )
-                        }
-                    }
-                }
-            }
-            items(
-                rootState.configServer.managedNetworks,
-                key = { "managed-${it.instanceId}-${it.instanceName}" }
-            ) { network ->
-                QCard(palette) {
-                    Text(
-                        network.instanceName.ifBlank { network.instanceId.ifBlank { "下发网络" } },
-                        color = palette.text,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        if (network.localCidr.isBlank()) "等待虚拟 IP" else "已连接: ${network.localCidr}",
-                        color = palette.subText,
-                        fontSize = 12.sp
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    var nodesExpanded by remember(network.instanceId, network.instanceName) { mutableStateOf(true) }
-                    NodeList(
-                        palette = palette,
-                        nodes = network.nodes,
-                        expanded = nodesExpanded,
-                        onExpandedChange = { nodesExpanded = it }
-                    )
-                }
-            }
-        }
     }
 }
 
@@ -1726,14 +1660,19 @@ private fun SettingsPage(
         }
         item {
             QCard(palette) {
-                SwitchRow("开机自动恢复 Root 网络", settings.bootAutoStart, palette) {
-                    onSettings(settings.copy(bootAutoStart = it))
-                }
                 SwitchRow("深色模式", settings.darkMode, palette) {
                     onSettings(settings.copy(darkMode = it))
                 }
                 SwitchRow("自动配置出口节点路由", settings.exitNodeAutoRoutes, palette) {
                     if (it) disclaimer = true else onSettings(settings.copy(exitNodeAutoRoutes = false))
+                }
+                if (settings.rootModeEnabled && rootAvailable) {
+                    SwitchRow("开机自动恢复 Root 网络", settings.bootAutoStart, palette) {
+                        onSettings(settings.copy(bootAutoStart = it))
+                    }
+                    SwitchRow("开机开启无线 ADB (5555)", settings.bootAdbEnabled, palette) {
+                        onSettings(settings.copy(bootAdbEnabled = it))
+                    }
                 }
             }
         }
