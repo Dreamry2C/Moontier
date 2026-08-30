@@ -1,9 +1,9 @@
 # MoonTier
 
-MoonTier 是一个面向 Android 的第三方 EasyTier 图形客户端，提供 VPN 与 Root 两种运行模式。
+MoonTier 是一个第三方 EasyTier Android 图形客户端，用于在 Android 设备上管理和运行 EasyTier 网络。
 
 - VPN 模式通过 Android `VpnService` 和内置 FFI Core 运行，不需要 Root。
-- Root 模式直接运行 EasyTier 官方发布的 `easytier-core`，适合云手机、常驻设备和需要与其他 VPN 并行使用的场景。
+- Root 模式直接运行 EasyTier 官方发布的 `easytier-core`，适合后台常驻、开机恢复以及不希望占用 Android VPN 槽位的场景。
 
 > [!IMPORTANT]
 > MoonTier 不是 EasyTier 官方客户端，与 EasyTier 官方无隶属关系。Root、开机启动和无线 ADB 功能会修改设备运行状态，请确认理解风险后再启用。
@@ -17,7 +17,7 @@ MoonTier 是一个面向 Android 的第三方 EasyTier 图形客户端，提供 
 - Root Core 独立于界面进程运行，普通划掉后台后可继续保持连接。
 - 兼容标准 `su -c`、厂商 `su 0 sh -c` 和 BusyBox Root 调用方式。
 - 开机自动恢复 Root 网络，默认关闭。
-- 开机开启无线 ADB `5555`，默认关闭，兼容部分云手机的 `vdbd`。
+- 开机开启无线 ADB `5555`，默认关闭，兼容部分 Android 系统使用的 `vdbd` 服务。
 - VPN/Root 通用的增强保活通知，默认关闭。
 - 用户服务器收藏与 HTTPS/TXT 地址导入。
 - 可选的 EasyTier 配置服务器/网页控制台连接。
@@ -80,7 +80,7 @@ listeners = []
 | 开机开启无线 ADB (5555) | 关闭 | 使用 Root 设置并检查 ADB TCP 端口，仅建议在可信网络使用 |
 | 增强保活通知 | 关闭 | VPN/Root 通用，启动独立前台通知服务，提高 App 界面进程的后台优先级 |
 
-Android 对“强行停止”应用有特殊限制：应用被系统设置页或 `am force-stop` 强行停止后，开机广播可能不会再次投递，直到用户手动打开一次 App。部分云手机还会清理 App 拉起的 Root 子进程，这是云厂商策略差异，不代表配置丢失。
+Android 对“强行停止”应用有特殊限制：应用被系统设置页或 `am force-stop` 强行停止后，开机广播可能不会再次投递，直到用户手动打开一次 App。部分 ROM 或 Root 管理方案还会清理 App 拉起的 Root 子进程，这不代表配置丢失，重新打开 App 后可再次恢复。
 
 ## 无线 ADB 安全提示
 
@@ -145,8 +145,6 @@ gradle --no-daemon :app:assembleDebug
 ```powershell
 .\build-apk.ps1
 ```
-
-APK 构建产物不会提交到 Git，请通过 GitHub Releases 发布。
 
 ## 源码结构
 
