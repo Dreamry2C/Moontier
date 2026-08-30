@@ -3,14 +3,12 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
-$projectDir = Get-ChildItem -LiteralPath $repoRoot -Directory |
-    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'settings.gradle') } |
-    Select-Object -First 1 -ExpandProperty FullName
+$projectDir = $repoRoot
 $javaHome = Join-Path $repoRoot '.build-tools\jdk17\jdk-17.0.16+8'
 $androidSdk = Join-Path $repoRoot '.build-tools\android-sdk'
 $gradle = Join-Path $repoRoot '.build-tools\gradle-9.3.1\bin\gradle.bat'
 
-foreach ($required in @($projectDir, $javaHome, $androidSdk, $gradle)) {
+foreach ($required in @((Join-Path $projectDir 'settings.gradle'), $javaHome, $androidSdk, $gradle)) {
     if (-not $required -or -not (Test-Path -LiteralPath $required)) {
         throw "Missing build dependency: $required"
     }

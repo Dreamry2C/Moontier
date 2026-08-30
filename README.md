@@ -124,7 +124,7 @@ ADB 具有很高的设备控制权限。请使用私有网络名和强密码，�
 
 ## 从源码构建
 
-Android 工程位于 [`MoonTier-1.0.0源码`](./MoonTier-1.0.0源码)。
+Android 工程位于仓库根目录。
 
 构建要求：
 
@@ -151,13 +151,16 @@ APK 构建产物不会提交到 Git，请通过 GitHub Releases 发布。
 ## 源码结构
 
 ```text
-MoonTier-1.0.0源码/
+Moontier/
 ├─ app/                         Android App
 │  ├─ src/main/java/            Kotlin/Java 源码
 │  ├─ src/main/cpp/             JNI Bridge
 │  ├─ src/main/assets/root/     Root manager 与启动脚本资源
 │  └─ src/main/jniLibs/         预编译 VPN FFI 库
-└─ tools/root-manager-client/   Root manager 客户端源码
+├─ tools/root-manager-client/   Root manager 客户端源码
+├─ build.gradle                 Android Gradle Plugin 配置
+├─ settings.gradle              Gradle 工程配置
+└─ build-apk.ps1                本地 Debug APK 构建脚本
 ```
 
 ## 致谢
