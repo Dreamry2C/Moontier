@@ -228,6 +228,8 @@ data class AppSettings(
     val darkMode: Boolean = false,
     val rootModeEnabled: Boolean = false,
     val coreAutoUpdate: Boolean = false,
+    val coreDownloadProxyEnabled: Boolean = false,
+    val coreDownloadProxies: List<String> = DEFAULT_CORE_DOWNLOAD_PROXIES,
     val coreLogLevel: String = CoreLogLevel.OFF,
     val configServerUrl: String = "",
     val configServerHostname: String = "",
@@ -244,6 +246,8 @@ data class AppSettings(
         .put("dark_mode", darkMode)
         .put("root_mode_enabled", rootModeEnabled)
         .put("core_auto_update", coreAutoUpdate)
+        .put("core_download_proxy_enabled", coreDownloadProxyEnabled)
+        .put("core_download_proxies", coreDownloadProxies.toJsonArray())
         .put("core_log_level", CoreLogLevel.normalize(coreLogLevel))
         .put("config_server_url", configServerUrl)
         .put("config_server_hostname", configServerHostname)
@@ -261,6 +265,12 @@ data class AppSettings(
             darkMode = obj.optBoolean("dark_mode", false),
             rootModeEnabled = obj.optBoolean("root_mode_enabled", false),
             coreAutoUpdate = obj.optBoolean("core_auto_update", false),
+            coreDownloadProxyEnabled = obj.optBoolean("core_download_proxy_enabled", false),
+            coreDownloadProxies = if (obj.has("core_download_proxies")) {
+                obj.optStringArray("core_download_proxies")
+            } else {
+                DEFAULT_CORE_DOWNLOAD_PROXIES
+            },
             coreLogLevel = CoreLogLevel.normalize(obj.optString("core_log_level", CoreLogLevel.OFF)),
             configServerUrl = obj.optString("config_server_url", ""),
             configServerHostname = obj.optString("config_server_hostname", ""),
@@ -273,6 +283,12 @@ data class AppSettings(
         )
     }
 }
+
+val DEFAULT_CORE_DOWNLOAD_PROXIES = listOf(
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+    "https://mirror.ghproxy.com/"
+)
 
 data class NodeInfo(
     val hostname: String,

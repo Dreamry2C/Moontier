@@ -30,26 +30,44 @@ class RootCoreManager(private val context: Context) {
     fun installedVersion(): String =
         runCatching { versionFile.readText().trim() }.getOrDefault("")
 
-    fun checkLatest(): String? {
-        val connection = URL("https://api.github.com/repos/EasyTier/EasyTier/releases/latest")
-            .openConnection() as HttpURLConnection
-        connection.connectTimeout = 8000
-        connection.readTimeout = 10000
-        connection.requestMethod = "GET"
-        connection.setRequestProperty("Accept", "application/vnd.github+json")
-        connection.setRequestProperty("User-Agent", "MoonTier")
-        return runCatching {
-            val body = connection.inputStream.bufferedReader().use { it.readText() }
-            JSONObject(body).optString("tag_name").trim().ifBlank { null }
-        }.getOrNull()
+    fun checkLatest(useProxies: Boolean, proxies: List<String>): String? {
+        val original = "https://api.github.com/repos/EasyTier/EasyTier/releases/latest"
+        val errors = ArrayList<String>()
+        for (url in candidateUrls(original, useProxies, proxies)) {
+            try {
+                val connection = URL(url).openConnection() as HttpURLConnection
+                connection.connectTimeout = 8000
+                connection.readTimeout = 10000
+                connection.requestMethod = "GET"
+                connection.instanceFollowRedirects = true
+                connection.setRequestProperty("Accept", "application/vnd.github+json")
+                connection.setRequestProperty("User-Agent", "MoonTier")
+                val code = connection.responseCode
+                if (code !in 200..299) throw IllegalStateException("HTTP $code")
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                val tag = JSONObject(body).optString("tag_name").trim()
+                if (tag.isBlank()) throw IllegalStateException("响应中缺少版本号")
+                AppDiagnostics.info("root", "EasyTier 版本源成功: ${URL(url).host}")
+                return tag
+            } catch (error: Exception) {
+                val detail = "${runCatching { URL(url).host }.getOrDefault(url)}: ${error.message ?: error.javaClass.simpleName}"
+                errors += detail
+                AppDiagnostics.warn("root", "EasyTier 版本源失败: $detail")
+            }
+        }
+        return null
     }
 
-    suspend fun installLatest(onProgress: (Int, Int) -> Unit): String =
+    suspend fun installLatest(
+        useProxies: Boolean,
+        proxies: List<String>,
+        onProgress: (Int, Int) -> Unit
+    ): String =
         withContext(Dispatchers.IO) {
-            val tag = checkLatest() ?: throw IllegalStateException("无法获取官方最新版本")
+            val tag = checkLatest(useProxies, proxies) ?: throw IllegalStateException("无法获取官方最新版本")
             val zip = File(context.cacheDir, "easytier-core-$tag.zip")
             try {
-                downloadRelease(tag, zip, onProgress)
+                downloadRelease(tag, zip, useProxies, proxies, onProgress)
                 installRelease(zip, tag)
             } finally {
                 zip.delete()
@@ -84,12 +102,13 @@ class RootCoreManager(private val context: Context) {
     private fun downloadRelease(
         tag: String,
         target: File,
+        useProxies: Boolean,
+        proxies: List<String>,
         onProgress: (Int, Int) -> Unit
     ) {
         val original = "https://github.com/EasyTier/EasyTier/releases/download/$tag/easytier-linux-aarch64-$tag.zip"
-        val urls = DOWNLOAD_MIRRORS.map { it + original } + original
         val errors = ArrayList<String>()
-        for (url in urls) {
+        for (url in candidateUrls(original, useProxies, proxies)) {
             val part = File(target.parentFile, target.name + ".part")
             part.delete()
             try {
@@ -133,6 +152,21 @@ class RootCoreManager(private val context: Context) {
             }
         }
         throw IllegalStateException("所有下载源均失败：${errors.joinToString("；")}")
+    }
+
+    private fun candidateUrls(original: String, useProxies: Boolean, proxies: List<String>): List<String> {
+        if (!useProxies) return listOf(original)
+        val normalized = proxies.cleanItems().mapNotNull { value ->
+            val candidate = if (value.contains("://")) value else "https://$value"
+            runCatching {
+                val parsed = URL(candidate)
+                require(parsed.protocol == "https" && parsed.host.isNotBlank())
+                candidate.trimEnd('/') + "/"
+            }.onFailure {
+                AppDiagnostics.warn("root", "忽略无效的 GitHub 下载代理: $value")
+            }.getOrNull()
+        }.distinctBy { it.lowercase() }
+        return normalized.map { it + original } + original
     }
 
     private fun extractRelease(zip: File) {
@@ -237,10 +271,5 @@ class RootCoreManager(private val context: Context) {
 
     companion object {
         private const val MANAGER_CLIENT_VERSION = "1"
-        private val DOWNLOAD_MIRRORS = arrayOf(
-            "https://ghfast.top/",
-            "https://gh-proxy.com/",
-            "https://mirror.ghproxy.com/"
-        )
     }
 }

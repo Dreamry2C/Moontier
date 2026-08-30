@@ -94,14 +94,14 @@ ADB 具有很高的设备控制权限。请使用私有网络名和强密码，�
 
 ## Core 下载
 
-Root 模式下载 EasyTier Release 资源时，会按以下顺序尝试：
+“设置 > 下载核心”中的“使用 GitHub 下载代理”默认关闭。开启后可以编辑代理地址，默认按以下顺序尝试：
 
 1. `https://ghfast.top/`
 2. `https://gh-proxy.com/`
 3. `https://mirror.ghproxy.com/`
 4. GitHub 原始地址
 
-代理全部失败后才回退到 GitHub。也可以下载 EasyTier 官方的 Linux aarch64 ZIP，在 App 内使用“导入 ZIP”离线安装。
+这些站点属于 GitHub 下载反向代理，不是 EasyTier 官方镜像。代理全部失败后会自动回退 GitHub 原站；关闭该开关时只访问 GitHub。也可以下载 EasyTier 官方的 Linux aarch64 ZIP，在 App 内使用“导入 ZIP”离线安装。
 
 ## 数据与排障
 

@@ -110,6 +110,8 @@ class ConfigStore(private val context: Context) {
             darkMode = settings.darkMode,
             rootModeEnabled = settings.rootModeEnabled,
             coreAutoUpdate = settings.coreAutoUpdate,
+            coreDownloadProxyEnabled = settings.coreDownloadProxyEnabled,
+            coreDownloadProxies = settings.coreDownloadProxies,
             coreLogLevel = settings.coreLogLevel,
             configServerUrl = settings.configServerUrl,
             configServerHostname = settings.configServerHostname,
