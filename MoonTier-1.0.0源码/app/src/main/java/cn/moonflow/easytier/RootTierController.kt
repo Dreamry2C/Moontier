@@ -93,7 +93,13 @@ class RootTierController(private val context: Context) {
     fun checkCoreUpdate() {
         scope.launch {
             state = state.copy(core = state.core.copy(checking = true, message = ""))
-            val latest = withContext(Dispatchers.IO) { coreManager.checkLatest() }
+            val settings = store.loadSettings()
+            val latest = withContext(Dispatchers.IO) {
+                coreManager.checkLatest(
+                    settings.coreDownloadProxyEnabled,
+                    settings.coreDownloadProxies
+                )
+            }
             state = state.copy(
                 core = state.core.copy(
                     checking = false,
@@ -109,8 +115,12 @@ class RootTierController(private val context: Context) {
             state = state.copy(core = state.core.copy(installing = true, progress = 0, message = ""))
             AppDiagnostics.event("root", "official core download requested")
             try {
+                val settings = store.loadSettings()
                 val tag = withContext(Dispatchers.IO) {
-                    coreManager.installLatest { progress, _ ->
+                    coreManager.installLatest(
+                        settings.coreDownloadProxyEnabled,
+                        settings.coreDownloadProxies
+                    ) { progress, _ ->
                         state = state.copy(core = state.core.copy(progress = progress))
                     }
                 }

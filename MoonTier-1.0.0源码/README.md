@@ -30,7 +30,7 @@ gradle assembleRelease
 
 The repository root also provides `build-apk.ps1`. With the local tools under
 `.build-tools`, it builds a debug APK and writes a versioned artifact such as
-`moontier-v1.2.1-abcdef12-debug.apk` under `.build-tools/artifacts/`, while also
+`moontier-v1.2.2-abcdef12-debug.apk` under `.build-tools/artifacts/`, while also
 refreshing `.build-tools/moontier-debug-latest.apk`.
 
 ## Signing

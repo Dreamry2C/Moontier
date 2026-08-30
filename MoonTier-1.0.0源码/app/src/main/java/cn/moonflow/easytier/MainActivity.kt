@@ -1829,6 +1829,25 @@ private fun SettingsPage(
                     SwitchRow("Root 模式自动检查更新", settings.coreAutoUpdate, palette) {
                         onSettings(settings.copy(coreAutoUpdate = it))
                     }
+                    SwitchRow("使用 GitHub 下载代理", settings.coreDownloadProxyEnabled, palette) {
+                        onSettings(settings.copy(coreDownloadProxyEnabled = it))
+                    }
+                    AnimatedVisibility(
+                        visible = settings.coreDownloadProxyEnabled,
+                        enter = expandVertically(tween(220)) + fadeIn(tween(180)),
+                        exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                    ) {
+                        Column {
+                            Spacer(Modifier.height(8.dp))
+                            ListEditor(
+                                title = "代理地址（按顺序）",
+                                values = settings.coreDownloadProxies,
+                                placeholder = "https://proxy.example/",
+                                palette = palette,
+                                onValues = { onSettings(settings.copy(coreDownloadProxies = it)) }
+                            )
+                        }
+                    }
                     Text(
                         "Root 模式直接运行官方发布的 aarch64 easytier-core，可单独更新，不依赖 FFI。",
                         color = palette.subText,
