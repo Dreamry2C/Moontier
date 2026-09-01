@@ -1,5 +1,7 @@
 package cn.moonflow.easytier
 
+import java.io.IOException
+
 data class ShellResult(
     val exitCode: Int,
     val output: String,
@@ -82,13 +84,17 @@ object RootManager {
             val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
             val output = StringBuilder()
             val reader = Thread({
-                process.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        synchronized(output) {
-                            if (output.isNotEmpty()) output.append('\n')
-                            output.append(line)
+                try {
+                    process.inputStream.bufferedReader().useLines { lines ->
+                        lines.forEach { line ->
+                            synchronized(output) {
+                                if (output.isNotEmpty()) output.append('\n')
+                                output.append(line)
+                            }
                         }
                     }
+                } catch (_: IOException) {
+                    // Destroying a timed-out process closes its output stream from another thread.
                 }
             }, "MoonTier-root-output").apply {
                 isDaemon = true
@@ -103,6 +109,7 @@ object RootManager {
             }
             if (!finished) {
                 process.destroy()
+                reader.join(1000)
                 return ShellResult(-1, "命令执行超时", timedOut = true)
             }
             reader.join(1000)
