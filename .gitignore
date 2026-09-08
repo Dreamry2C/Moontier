@@ -23,3 +23,23 @@ local.properties
 *.hprof
 *.log
 captures/
+
+# Local credentials and signing materials
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.pk8
+*.der
+*.gpg
+credentials*.json
+github-token*
+release-notes.local.md
+
+# Repository-local agent skills
+skills/
