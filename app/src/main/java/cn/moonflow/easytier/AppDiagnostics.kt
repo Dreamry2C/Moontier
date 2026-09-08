@@ -41,7 +41,7 @@ object CoreLogLevel {
 /** Writes launcher diagnostics separately from the FFI and root-manager core logs. */
 object AppDiagnostics {
     private const val TAG = "MoonTierDiag"
-    private const val MAX_FILE_BYTES = 256 * 1024
+    private const val MAX_FILE_BYTES = 512 * 1024
 
     private var logFile: File? = null
 
@@ -122,7 +122,7 @@ object AppDiagnostics {
         if (managerLog.isNotEmpty()) {
             appendLine()
             appendLine("[root_manager]")
-            managerLog.takeLast(120).forEach(::appendLine)
+            managerLog.takeLast(400).forEach(::appendLine)
         }
     }
 
