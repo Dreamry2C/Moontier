@@ -6,6 +6,8 @@ ACTION="$1"
 CORE="$2"
 LOG="$3"
 PID_FILE="$4"
+MAX_LOG_BYTES=1048576
+KEEP_LOG_BYTES=524288
 shift 4
 
 ensure_tun() {
@@ -37,7 +39,20 @@ case "$ACTION" in
         fi
         rm -f "$PID_FILE"
         cd "$(dirname "$CORE")" || exit 1
-        : > "$LOG"
+        if [ "$LOG" != "/dev/null" ]; then
+            if [ -f "$LOG" ]; then
+                LOG_SIZE=$(wc -c < "$LOG" 2>/dev/null)
+                if [ -n "$LOG_SIZE" ] && [ "$LOG_SIZE" -gt "$MAX_LOG_BYTES" ] 2>/dev/null; then
+                    TRIMMED_LOG="${LOG}.trim"
+                    if tail -c "$KEEP_LOG_BYTES" "$LOG" >"$TRIMMED_LOG" 2>/dev/null && mv "$TRIMMED_LOG" "$LOG"; then
+                        :
+                    else
+                        rm -f "$TRIMMED_LOG"
+                    fi
+                fi
+            fi
+            printf '\n--- MoonTier manager start %s ---\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" >>"$LOG"
+        fi
         nohup "$CORE" "$@" >>"$LOG" 2>&1 &
         PID=$!
         echo "$PID" > "$PID_FILE"

@@ -81,12 +81,39 @@ class RootTierController(private val context: Context) {
     fun diagnosticLogTail(): List<String> = readManagerLogTail(loadManagerOptions())
 
     fun updateLogLevel(level: String) {
-        if (CoreLogLevel.normalize(level) == CoreLogLevel.OFF) {
-            managerLogFile.delete()
+        val normalized = CoreLogLevel.normalize(level)
+        if (normalized == CoreLogLevel.OFF) {
             state = state.copy(
                 instances = state.instances.map { it.copy(logs = emptyList()) },
                 configServer = state.configServer.copy(logs = emptyList())
             )
+        }
+        scope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    managerMutex.withLock {
+                        if (!managerAlive()) {
+                            null
+                        } else {
+                            val options = loadManagerOptions()
+                                ?: optionsFromSettings(store.loadSettings(), enabled = false)
+                            stopManagerBlocking()
+                            ensureManagerBlocking(options)
+                            refreshedState(queryManagerSnapshot(), options)
+                        }
+                    }
+                }
+            }
+            result.onSuccess { refreshed ->
+                if (refreshed != null) {
+                    state = state.copy(
+                        instances = refreshed.instances,
+                        configServer = refreshed.configServer
+                    )
+                }
+            }.onFailure { error ->
+                AppDiagnostics.error("root", "manager log level restart failed", error)
+            }
         }
     }
 
@@ -1130,7 +1157,7 @@ class RootTierController(private val context: Context) {
             .filter { it.isNotBlank() }
             .map { redactConfigServerToken(it, rawUrl, resolvedUrl) }
             .toList()
-            .takeLast(80)
+            .takeLast(400)
     }
 
     private fun trimManagerLog() {
@@ -1301,7 +1328,7 @@ class RootTierController(private val context: Context) {
 
     companion object {
         private const val TAG = "MoonTierRoot"
-        private const val MAX_MANAGER_LOG_BYTES = 512 * 1024
+        private const val MAX_MANAGER_LOG_BYTES = 1024 * 1024
         private val IMPORTANT_CORE_LOG = Regex(
             "error|warn|fail|panic|closed|stop|disconnect|exit|timeout",
             RegexOption.IGNORE_CASE

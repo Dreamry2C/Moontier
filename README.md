@@ -117,10 +117,10 @@ ADB 具有很高的设备控制权限。请使用私有网络名和强密码，�
 - `settings.json`：应用设置。
 - `root/core/`：Root Core、CLI 和管理客户端。
 - `root/configs/`：Root manager 使用的 TOML 配置。
-- `root/logs/manager.log`：Root Core/manager 日志。
-- `diagnostics.log`：MoonTier 应用诊断日志。
+- `root/logs/manager.log`：Root Core/manager 日志，跨 manager 重启保留并用启动分隔线区分会话，超过 1 MB 时自动保留后 512 KB。
+- `diagnostics.log`：MoonTier 应用诊断日志，超过 512 KB 时自动保留后 256 KB。
 
-排障时可在设置页把 Core 日志级别切换为“调试”，复现问题后导出日志。公开日志前请检查网络名、密钥、服务器地址和设备信息等敏感内容。
+排障时可在设置页把 Core 日志级别切换为“调试”；Root 模式切换级别会重启共享 manager，可能造成一次短暂的网络中断。复现问题后导出日志。公开日志前请检查网络名、密钥、服务器地址和设备信息等敏感内容。
 
 ## 从源码构建
 
