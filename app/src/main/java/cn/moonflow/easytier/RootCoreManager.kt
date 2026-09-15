@@ -16,16 +16,18 @@ class RootCoreManager(private val context: Context) {
     val coreDir = File(rootDir, "core")
     val coreFile = File(coreDir, "easytier-core")
     val cliFile = File(coreDir, "easytier-cli")
-    val managerClientFile = File(coreDir, "moontier-root-manager")
     private val versionFile = File(coreDir, "version.txt")
-    private val managerClientVersionFile = File(coreDir, "manager-client.version")
 
     fun ensureDirectories() {
         coreDir.mkdirs()
-        installBundledManagerClient()
     }
 
-    fun isReady(): Boolean = coreFile.isFile && cliFile.isFile && managerClientFile.isFile
+    fun isReady(): Boolean = runCatching {
+        RootArchitecture.fromElf(coreFile) == targetArchitecture() &&
+            RootArchitecture.fromElf(cliFile) == targetArchitecture()
+    }.getOrDefault(false)
+
+    fun targetArchitecture(): RootArchitecture = RootArchitecture.device()
 
     fun installedVersion(): String =
         runCatching { versionFile.readText().trim() }.getOrDefault("")
@@ -61,21 +63,22 @@ class RootCoreManager(private val context: Context) {
     suspend fun installLatest(
         useProxies: Boolean,
         proxies: List<String>,
-        onProgress: (Int, Int) -> Unit
+        onProgress: (Int, Int) -> Unit,
+        beforeReplace: () -> Unit = {}
     ): String =
         withContext(Dispatchers.IO) {
             val tag = checkLatest(useProxies, proxies) ?: throw IllegalStateException("无法获取官方最新版本")
             val zip = File(context.cacheDir, "easytier-core-$tag.zip")
             try {
                 downloadRelease(tag, zip, useProxies, proxies, onProgress)
-                installRelease(zip, tag)
+                installRelease(zip, tag, beforeReplace)
             } finally {
                 zip.delete()
             }
             tag
         }
 
-    suspend fun installFromZip(uri: Uri, onProgress: (Int, Int) -> Unit): String =
+    suspend fun installFromZip(uri: Uri, onProgress: (Int, Int) -> Unit, beforeReplace: () -> Unit = {}): String =
         withContext(Dispatchers.IO) {
             val zip = File.createTempFile("easytier-import-", ".zip", context.cacheDir)
             try {
@@ -84,7 +87,7 @@ class RootCoreManager(private val context: Context) {
                     FileOutputStream(zip).use { output -> input.copyTo(output) }
                 } ?: throw IllegalStateException("无法读取所选 ZIP 文件")
                 if (zip.length() == 0L) throw IllegalStateException("所选 ZIP 文件为空")
-                installRelease(zip, "本地 ZIP")
+                installRelease(zip, "本地 ZIP", beforeReplace)
                 onProgress(100, (zip.length() / 1024).toInt())
                 "本地 ZIP"
             } finally {
@@ -92,8 +95,8 @@ class RootCoreManager(private val context: Context) {
             }
         }
 
-    private fun installRelease(zip: File, version: String) {
-        extractRelease(zip)
+    private fun installRelease(zip: File, version: String, beforeReplace: () -> Unit) {
+        extractRelease(zip, beforeReplace)
         versionFile.writeText(version)
         coreFile.setExecutable(true, false)
         cliFile.setExecutable(true, false)
@@ -106,7 +109,7 @@ class RootCoreManager(private val context: Context) {
         proxies: List<String>,
         onProgress: (Int, Int) -> Unit
     ) {
-        val original = "https://github.com/EasyTier/EasyTier/releases/download/$tag/easytier-linux-aarch64-$tag.zip"
+        val original = "https://github.com/EasyTier/EasyTier/releases/download/$tag/easytier-linux-${targetArchitecture().releaseName}-$tag.zip"
         val errors = ArrayList<String>()
         for (url in candidateUrls(original, useProxies, proxies)) {
             val part = File(target.parentFile, target.name + ".part")
@@ -169,7 +172,7 @@ class RootCoreManager(private val context: Context) {
         return normalized.map { it + original } + original
     }
 
-    private fun extractRelease(zip: File) {
+    private fun extractRelease(zip: File, beforeReplace: () -> Unit) {
         coreDir.mkdirs()
         val tempCore = File(coreDir, "${coreFile.name}.tmp")
         val tempCli = File(coreDir, "${cliFile.name}.tmp")
@@ -216,6 +219,17 @@ class RootCoreManager(private val context: Context) {
                     throw IllegalStateException("官方压缩包中缺少 easytier-core 或 easytier-cli")
                 }
             }
+            for (binary in listOf(tempCore, tempCli)) {
+                require(RootArchitecture.fromElf(binary) == targetArchitecture()) {
+                    "核心架构不匹配，需要 ${targetArchitecture().releaseName} 的官方 Linux ZIP"
+                }
+                check(binary.setExecutable(true, false)) { "无法设置核心执行权限" }
+                val result = RootManager.su("'${binary.absolutePath}' --version", 8000)
+                check(result.success && result.output.contains("easytier", ignoreCase = true)) {
+                    "核心无法在本机运行：${result.output.take(500)}"
+                }
+            }
+            beforeReplace()
             replaceBinaries(tempCore, tempCli)
         } finally {
             tempCore.delete()
@@ -238,38 +252,16 @@ class RootCoreManager(private val context: Context) {
             oldCore.delete()
             oldCli.delete()
         } catch (error: Exception) {
-            coreFile.delete()
-            cliFile.delete()
-            if (hadCore) oldCore.renameTo(coreFile)
-            if (hadCli) oldCli.renameTo(cliFile)
+            if (oldCore.exists()) {
+                coreFile.delete()
+                check(oldCore.renameTo(coreFile)) { "无法恢复原核心，备份仍在 ${oldCore.name}" }
+            } else if (!hadCore) coreFile.delete()
+            if (oldCli.exists()) {
+                cliFile.delete()
+                check(oldCli.renameTo(cliFile)) { "无法恢复原 CLI，备份仍在 ${oldCli.name}" }
+            } else if (!hadCli) cliFile.delete()
             throw error
         }
     }
 
-    private fun installBundledManagerClient() {
-        val currentVersion = runCatching { managerClientVersionFile.readText().trim() }.getOrDefault("")
-        if (managerClientFile.isFile && currentVersion == MANAGER_CLIENT_VERSION) {
-            managerClientFile.setExecutable(true, false)
-            return
-        }
-
-        val temp = File(coreDir, "${managerClientFile.name}.tmp")
-        context.assets.open("root/moontier-root-manager").use { input ->
-            temp.outputStream().use { output -> input.copyTo(output) }
-        }
-        if (managerClientFile.exists() && !managerClientFile.delete()) {
-            temp.delete()
-            throw IllegalStateException("无法更新 Root 管理客户端")
-        }
-        if (!temp.renameTo(managerClientFile)) {
-            temp.delete()
-            throw IllegalStateException("无法安装 Root 管理客户端")
-        }
-        managerClientFile.setExecutable(true, false)
-        managerClientVersionFile.writeText(MANAGER_CLIENT_VERSION)
-    }
-
-    companion object {
-        private const val MANAGER_CLIENT_VERSION = "1"
-    }
 }

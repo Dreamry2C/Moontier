@@ -1849,7 +1849,7 @@ private fun SettingsPage(
                         }
                     }
                     Text(
-                        "Root 模式直接运行官方发布的 aarch64 easytier-core，可单独更新，不依赖 FFI。",
+                        "本机 Root 架构：${core.architecture}。自动下载对应的官方 Core 和 CLI，可单独更新。",
                         color = palette.subText,
                         fontSize = 12.sp,
                         lineHeight = 18.sp
