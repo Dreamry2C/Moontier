@@ -324,6 +324,7 @@ data class RootInstanceState(
 )
 
 data class RootCoreState(
+    val architecture: String = "",
     val ready: Boolean = false,
     val installedVersion: String = "",
     val latestVersion: String = "",

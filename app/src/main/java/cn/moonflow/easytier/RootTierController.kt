@@ -38,6 +38,7 @@ class RootTierController(private val context: Context) {
     private val managerPidFile = File(pidsDir, "manager.pid")
     private val managerMetaFile = File(metaDir, "manager.json")
     private val managerMutex = Mutex()
+    private val managerRpc = RootRpcManager()
     private var pollJob: Job? = null
     private var lastRootCidr = ""
     private var lastRootExitRoute = false
@@ -76,6 +77,7 @@ class RootTierController(private val context: Context) {
     fun release() {
         pollJob?.cancel()
         scope.cancel()
+        managerRpc.close()
     }
 
     fun diagnosticLogTail(): List<String> = readManagerLogTail(loadManagerOptions())
@@ -137,97 +139,47 @@ class RootTierController(private val context: Context) {
         }
     }
 
-    fun installCore() {
-        scope.launch {
-            state = state.copy(core = state.core.copy(installing = true, progress = 0, message = ""))
-            AppDiagnostics.event("root", "official core download requested")
-            try {
-                val settings = store.loadSettings()
-                val tag = withContext(Dispatchers.IO) {
-                    coreManager.installLatest(
-                        settings.coreDownloadProxyEnabled,
-                        settings.coreDownloadProxies
-                    ) { progress, _ ->
-                        state = state.copy(core = state.core.copy(progress = progress))
-                    }
-                }
-                state = state.copy(
-                    core = RootCoreState(
-                        ready = true,
-                        installedVersion = tag,
-                        latestVersion = tag,
-                        progress = 100,
-                        message = "已安装官方核心 $tag"
-                    )
-                )
-                AppDiagnostics.event("root", "official core installed: $tag")
-            } catch (error: Exception) {
-                AppDiagnostics.error("root", "official core installation failed", error)
-                state = state.copy(
-                    core = state.core.copy(
-                        installing = false,
-                        message = error.message ?: "下载核心失败"
-                    )
-                )
-            }
-        }
-    }
+    fun installCore() = installCore(null)
 
-    fun installCoreZip(uri: Uri) {
+    fun installCoreZip(uri: Uri) = installCore(uri)
+
+    private fun installCore(uri: Uri?) {
+        if (state.core.installing) return
+        state = state.copy(core = state.core.copy(installing = true, progress = 0, message = ""))
         scope.launch {
-            state = state.copy(core = state.core.copy(installing = true, progress = 0, message = ""))
-            AppDiagnostics.event("root", "local core ZIP import requested")
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     managerMutex.withLock {
-                        val options = loadManagerOptions()
-                            ?: optionsFromSettings(store.loadSettings(), enabled = false)
-                        val restartManager = managerAlive()
-                        if (restartManager) stopManagerBlocking()
+                        val settings = store.loadSettings()
+                        val options = loadManagerOptions() ?: optionsFromSettings(settings, false)
+                        val restart = managerAlive()
+                        var stopped = false
+                        val beforeReplace = {
+                            if (restart) { stopManagerBlocking(); stopped = true }
+                        }
+                        val progress: (Int, Int) -> Unit = { value, _ ->
+                            scope.launch { state = state.copy(core = state.core.copy(progress = value)) }
+                        }
                         try {
-                            val version = coreManager.installFromZip(uri) { progress, _ ->
-                                state = state.copy(core = state.core.copy(progress = progress))
-                            }
-                            val refreshed = if (restartManager) {
-                                ensureManagerBlocking(options)
-                                val snapshot = queryManagerSnapshot()
-                                applyRootRouting(snapshot)
-                                refreshedState(snapshot, options)
-                            } else {
-                                null
-                            }
-                            version to refreshed
+                            val version = if (uri == null) {
+                                coreManager.installLatest(settings.coreDownloadProxyEnabled, settings.coreDownloadProxies, progress, beforeReplace)
+                            } else coreManager.installFromZip(uri, progress, beforeReplace)
+                            if (restart) { prepareEnabledLocalConfigs(); ensureManagerBlocking(options) }
+                            version
                         } catch (error: Exception) {
-                            if (restartManager && coreManager.isReady()) {
-                                runCatching { ensureManagerBlocking(options) }
-                                    .onFailure { AppDiagnostics.error("root", "failed to restore manager after ZIP import", it) }
-                            }
+                            if (stopped && coreManager.isReady()) runCatching { ensureManagerBlocking(options) }
                             throw error
                         }
                     }
                 }
             }
-            result.onSuccess { (version, refreshed) ->
-                AppDiagnostics.event("root", "local core ZIP installed")
-                state = state.copy(
-                    core = RootCoreState(
-                        ready = true,
-                        installedVersion = version,
-                        latestVersion = state.core.latestVersion,
-                        progress = 100,
-                        message = "已导入官方核心"
-                    ),
-                    instances = refreshed?.instances ?: state.instances,
-                    configServer = refreshed?.configServer ?: state.configServer
-                )
+            refreshCoreState()
+            result.onSuccess { version ->
+                state = state.copy(core = state.core.copy(progress = 100, message = "已安装官方核心 $version (${state.core.architecture})"))
+                AppDiagnostics.event("root", "official core installed: $version (${state.core.architecture})")
             }.onFailure { error ->
-                AppDiagnostics.error("root", "local core ZIP import failed", error)
-                state = state.copy(
-                    core = state.core.copy(
-                        installing = false,
-                        message = error.message ?: "导入核心失败"
-                    )
-                )
+                state = state.copy(core = state.core.copy(message = error.message ?: "核心安装失败"))
+                AppDiagnostics.error("root", "core installation failed", error)
             }
         }
     }
@@ -408,7 +360,8 @@ class RootTierController(private val context: Context) {
         state = state.copy(
             core = RootCoreState(
                 ready = coreManager.isReady(),
-                installedVersion = coreManager.installedVersion()
+                installedVersion = coreManager.installedVersion(),
+                architecture = runCatching { coreManager.targetArchitecture().releaseName }.getOrDefault("不支持")
             )
         )
     }
@@ -619,6 +572,7 @@ class RootTierController(private val context: Context) {
     }
 
     private fun stopManagerBlocking() {
+        managerRpc.close()
         removeRootRouting()
         val command = buildString {
             append("sh ")
@@ -1013,27 +967,27 @@ class RootTierController(private val context: Context) {
             throw IllegalStateException("未检测到 root，请确认系统、厂商或 Root 管理器已授权 MoonTier")
         }
         if (!coreManager.isReady()) {
-            throw IllegalStateException("尚未下载官方 easytier-core，或管理客户端缺失")
+            throw IllegalStateException("尚未安装与本机架构匹配的官方核心，请在设置中重新下载")
         }
     }
 
-    private fun runManager(vararg args: String, timeoutMs: Long): ShellResult {
-        val command = buildString {
-            append(shq(coreManager.managerClientFile.absolutePath))
-            append(" -p ")
-            append(shq(MANAGER_RPC_PORTAL))
-            args.forEach {
-                append(' ')
-                append(shq(it))
-            }
+    private fun runManager(vararg args: String, timeoutMs: Long): ShellResult = try {
+        val output = when (args.first()) {
+            "list" -> JSONObject().put("instance_ids", JSONArray(managerRpc.list().map { it.uuid() })).toString()
+            "snapshot" -> managerRpc.snapshot().toString()
+            "run" -> { managerRpc.run(TomlCodec.parse(File(args[1]).readText())); "{}" }
+            "delete" -> { managerRpc.delete(args[1]); "{}" }
+            else -> error("未知的本地 Core 操作")
         }
-        return RootManager.su(command, timeoutMs)
+        ShellResult(0, output)
+    } catch (error: Exception) {
+        ShellResult(1, error.message ?: "本地 Core RPC 请求失败")
     }
 
     private fun managerError(result: ShellResult, fallback: String): String {
-        val output = result.output.lineSequence().lastOrNull { it.isNotBlank() }.orEmpty()
+        val output = result.output.trim().takeLast(1500)
         val log = readManagerLogTail(loadManagerOptions()).lastOrNull().orEmpty()
-        return output.ifBlank { log }.ifBlank { fallback }
+        return "$fallback：${output.ifBlank { log }.ifBlank { "未知错误" }}"
     }
 
     private fun managerAlive(): Boolean = isAlive(managerPid())
@@ -1210,7 +1164,7 @@ class RootTierController(private val context: Context) {
     private fun ensureScript() {
         scriptFile.parentFile?.mkdirs()
         context.assets.open("root/moontier_root.sh").use { input ->
-            scriptFile.outputStream().use { output -> input.copyTo(output) }
+            scriptFile.writeText(input.bufferedReader().readText().replace("\r\n", "\n"))
         }
         scriptFile.setExecutable(true, false)
     }
