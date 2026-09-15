@@ -58,17 +58,13 @@ class RootTierController(private val context: Context) {
             }
             result.onSuccess { refreshed ->
                 state = state.copy(
+                    managerError = "",
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
             }.onFailure { error ->
                 Log.e(TAG, "Root manager initialization failed", error)
-                if (!isFullConfigServerUrl(state.configServer.serverUrl)) return@onFailure
-                state = state.copy(
-                    configServer = state.configServer.copy(
-                        error = error.message ?: "Root manager 初始化失败"
-                    )
-                )
+                state = state.copy(managerError = error.message ?: "本地 Core 初始化失败")
             }
             pollJob = scope.launch { pollLoop() }
         }
@@ -81,6 +77,15 @@ class RootTierController(private val context: Context) {
     }
 
     fun diagnosticLogTail(): List<String> = readManagerLogTail(loadManagerOptions())
+
+    fun configServerSettingsChanged(previous: AppSettings, next: AppSettings) {
+        if (previous.configServerUrl.trim() != next.configServerUrl.trim()) {
+            if (state.configServer.running || state.configServer.starting) stopConfigServer()
+            else state = state.copy(configServer = RootConfigServerState(serverUrl = next.configServerUrl.trim()))
+        } else if (!next.configServerAutoConnect && !state.configServer.running && !state.configServer.starting) {
+            state = state.copy(configServer = RootConfigServerState(serverUrl = next.configServerUrl.trim()))
+        }
+    }
 
     fun updateLogLevel(level: String) {
         val normalized = CoreLogLevel.normalize(level)
@@ -209,6 +214,7 @@ class RootTierController(private val context: Context) {
                 Log.i(TAG, "Root instance ${config.id} started in ${SystemClock.elapsedRealtime() - startedAt}ms")
                 AppDiagnostics.event("root", "network started id=${config.id} elapsed=${SystemClock.elapsedRealtime() - startedAt}ms")
                 state = state.copy(
+                    managerError = "",
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
@@ -250,6 +256,7 @@ class RootTierController(private val context: Context) {
             result.onSuccess { refreshed ->
                 AppDiagnostics.event("root", "network stopped id=$configId")
                 state = state.copy(
+                    managerError = "",
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
@@ -314,6 +321,7 @@ class RootTierController(private val context: Context) {
             }
             result.onSuccess { refreshed ->
                 state = state.copy(
+                    managerError = "",
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
@@ -342,6 +350,7 @@ class RootTierController(private val context: Context) {
             }
             result.onSuccess { refreshed ->
                 state = state.copy(
+                    managerError = "",
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
@@ -367,16 +376,15 @@ class RootTierController(private val context: Context) {
     }
 
     private fun initializeBlocking(): RefreshedState {
-        val legacyConfigServerWasRunning = migrateLegacyProcesses()
+        migrateLegacyProcesses()
         val settings = store.loadSettings()
-        var options = loadManagerOptions() ?: optionsFromSettings(
-            settings,
-            enabled = legacyConfigServerWasRunning || settings.configServerAutoConnect
-        )
-        if (legacyConfigServerWasRunning && !options.configServerEnabled) {
-            options = optionsFromSettings(settings, enabled = true)
-            saveManagerOptions(options)
-        }
+        val saved = loadManagerOptions()
+        val alive = managerAlive()
+        val keepConnection = alive && saved?.configServerEnabled == true &&
+            saved.rawConfigServerUrl == settings.configServerUrl.trim()
+        val options = optionsFromSettings(settings, keepConnection || settings.configServerAutoConnect)
+        if (alive && saved?.sameLaunchOptions(options) != true) restartManagerForOptions(options)
+        saveManagerOptions(options)
 
         if (
             !managerAlive() &&
@@ -538,7 +546,7 @@ class RootTierController(private val context: Context) {
             append(shq(managerLogPath))
             append(' ')
             append(shq(managerPidFile.absolutePath))
-            append(" --config-dir ")
+            append(" --daemon --config-dir ")
             append(shq(configsDir.absolutePath))
             append(" --rpc-portal ")
             append(shq(MANAGER_RPC_PORTAL))
@@ -697,24 +705,23 @@ class RootTierController(private val context: Context) {
             if (refreshed == null) {
                 val wasExpected = state.instances.any { it.stopping } || state.configServer.stopping
                 state = state.copy(
-                    instances = emptyList(),
-                    configServer = state.configServer.copy(
-                        pid = 0,
-                        running = false,
-                        starting = false,
-                        stopping = false,
-                        connected = false,
-                        error = if (wasExpected) "" else "共享 manager 已退出"
-                    )
+                    managerError = if (wasExpected) "" else "本地 Core 已退出",
+                    instances = state.instances.filterNot { it.stopping }.map {
+                        it.copy(running = false, starting = false, error = "本地 Core 已退出")
+                    },
+                    configServer = RootConfigServerState(serverUrl = store.loadSettings().configServerUrl)
+
                 )
             } else {
                 state = state.copy(
+                    managerError = "",
                     instances = refreshed.instances,
                     configServer = refreshed.configServer
                 )
             }
         }.onFailure { error ->
             Log.w(TAG, "Root manager refresh failed", error)
+            state = state.copy(managerError = error.message ?: "本地 Core 状态读取失败")
         }
     }
 
@@ -811,23 +818,17 @@ class RootTierController(private val context: Context) {
                 )
             }
 
-        val logs = readManagerLogTail(options)
-        val connectedAt = logs.indexOfLast {
-            it.contains("Successfully connected", ignoreCase = true) ||
-                it.contains("connected to config server", ignoreCase = true)
-        }
-        val disconnectedAt = logs.indexOfLast {
-            it.contains("Failed to connect", ignoreCase = true) ||
-                it.contains("connection closed", ignoreCase = true) ||
-                it.contains("disconnected", ignoreCase = true)
-        }
+        val evidence = ConfigServerStatus.evidence(options.configServerEnabled,
+            options.rawConfigServerUrl, if (options.configServerEnabled) readManagerLogTail(options) else emptyList())
+        val enabled = options.configServerEnabled && isFullConfigServerUrl(options.rawConfigServerUrl)
         val configServer = RootConfigServerState(
-            pid = pid,
-            running = options.configServerEnabled,
-            connected = options.configServerEnabled && connectedAt >= 0 && connectedAt > disconnectedAt,
+            pid = if (enabled) pid else 0,
+            running = enabled,
+            connected = evidence.connected,
             serverUrl = options.rawConfigServerUrl,
-            managedNetworks = managed,
-            logs = logs
+            managedNetworks = if (enabled) managed else emptyList(),
+            logs = evidence.logs,
+            error = evidence.error
         )
         return RefreshedState(instances, configServer)
     }
@@ -1225,7 +1226,7 @@ class RootTierController(private val context: Context) {
     }
 
     private fun isFullConfigServerUrl(value: String): Boolean =
-        value.trim().contains("://")
+        ConfigServerStatus.configured(value)
 
     private fun safeId(id: String): String =
         id.replace(Regex("[^A-Za-z0-9_-]"), "_").take(64).ifBlank { "config" }
