@@ -354,6 +354,7 @@ data class RootConfigServerState(
 )
 
 data class RootTierState(
+    val managerError: String = "",
     val core: RootCoreState = RootCoreState(),
     val instances: List<RootInstanceState> = emptyList(),
     val configServer: RootConfigServerState = RootConfigServerState()

@@ -302,7 +302,7 @@ private data class ServerPickerState(
 )
 
 private fun isFullConfigServerUrl(value: String): Boolean =
-    value.trim().contains("://")
+    ConfigServerStatus.configured(value)
 
 private data class Palette(
     val background: Color,
@@ -399,8 +399,10 @@ private fun MoonTierApp(
                 rootController.stopAll()
             }
         }
+        val previous = settings
         settings = next
         store.saveSettings(next)
+        rootController.configServerSettingsChanged(previous, next)
         KeepAliveService.sync(appContext, next.keepAliveNotification)
         AppDiagnostics.configure(next.coreLogLevel)
         if (logLevelChanged) {
@@ -873,7 +875,7 @@ private fun RootNetworkPage(
     onEdit: (NetworkConfig) -> Unit
 ) {
     val rootState = rootController.state
-    val instances = rootState.instances.filter { it.running || it.starting || it.stopping }
+    val instances = rootState.instances.filter { it.running || it.starting || it.stopping || it.error.isNotBlank() }
     val defaultConfig = configs.firstOrNull { it.isDefault } ?: configs.firstOrNull() ?: NetworkConfig.defaultConfig()
     val selectedConfigId = configs.firstOrNull { it.id == rootSelectedConfigId }?.id ?: defaultConfig.id
     LaunchedEffect(configs, rootSelectedConfigId, selectedConfigId) {
@@ -882,7 +884,7 @@ private fun RootNetworkPage(
         }
     }
     val current = configs.firstOrNull { it.id == selectedConfigId } ?: defaultConfig
-    val selectedInstance = instances.firstOrNull { it.configId == current.id }
+    val selectedInstance = instances.firstOrNull { it.configId == current.id && (it.running || it.starting || it.stopping) }
     val core = rootState.core
 
     LazyColumn(
@@ -903,6 +905,9 @@ private fun RootNetworkPage(
                 },
                 palette = palette
             )
+        }
+        if (rootState.managerError.isNotBlank()) {
+            item { Text(rootState.managerError, color = palette.error, fontSize = 13.sp) }
         }
         item {
             QCard(palette) {
@@ -1393,16 +1398,19 @@ private fun ServersPage(
         if (rootMode) {
             item {
                 QCard(palette) {
+                    val configured = isFullConfigServerUrl(settings.configServerUrl)
                     val statusText = when {
+                        !configured -> "未配置"
                         !rootAvailable -> "Root 不可用"
                         configServer.stopping -> "正在断开"
                         configServer.starting -> "正在启动"
                         configServer.connected -> "已连接"
-                        configServer.running -> "正在连接"
                         configServer.error.isNotBlank() -> "连接失败"
+                        configServer.running -> "已启动（连接状态未确认）"
                         else -> "未连接"
                     }
                     val statusColor = when {
+                        !configured -> palette.subText
                         configServer.connected -> palette.success
                         configServer.error.isNotBlank() || !rootAvailable -> palette.error
                         else -> palette.subText
@@ -1431,6 +1439,7 @@ private fun ServersPage(
                         exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(tween(120))
                     ) {
                         Column(Modifier.padding(top = 10.dp)) {
+                            Text("仅在主动连接或启用自动连接后接入网页控制台。网络监听地址和本地 Core 管理接口是独立设置。", color = palette.subText, fontSize = 12.sp)
                             FieldBlock("完整配置服务器 URL", palette) {
                                 QTextField(
                                     value = settings.configServerUrl,
@@ -1461,7 +1470,7 @@ private fun ServersPage(
                             SwitchRow("启动时自动连接", settings.configServerAutoConnect, palette) {
                                 onSettings(settings.copy(configServerAutoConnect = it))
                             }
-                            if (configServer.error.isNotBlank()) {
+                            if (configured && configServer.error.isNotBlank()) {
                                 Text(configServer.error, color = palette.error, fontSize = 12.sp, lineHeight = 18.sp)
                             }
                             if (configServer.managedNetworks.isNotEmpty()) {
