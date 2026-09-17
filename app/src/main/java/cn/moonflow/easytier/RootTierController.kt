@@ -39,6 +39,7 @@ class RootTierController(private val context: Context) {
     private val managerMetaFile = File(metaDir, "manager.json")
     private val managerMutex = Mutex()
     private val managerRpc = RootRpcManager()
+    private var scriptUpdated = false
     private var pollJob: Job? = null
     private var lastRootCidr = ""
     private var lastRootExitRoute = false
@@ -48,6 +49,7 @@ class RootTierController(private val context: Context) {
 
     init {
         ensureDirs()
+        store.syncCoreLogLimit()
         ensureScript()
         refreshCoreState()
         scope.launch {
@@ -77,6 +79,8 @@ class RootTierController(private val context: Context) {
     }
 
     fun diagnosticLogTail(): List<String> = readManagerLogTail(loadManagerOptions())
+
+    fun rawCoreLog(): File = managerLogFile
 
     fun configServerSettingsChanged(previous: AppSettings, next: AppSettings) {
         if (previous.configServerUrl.trim() != next.configServerUrl.trim()) {
@@ -379,8 +383,13 @@ class RootTierController(private val context: Context) {
         migrateLegacyProcesses()
         val settings = store.loadSettings()
         val saved = loadManagerOptions()
-        val alive = managerAlive()
-        val keepConnection = alive && saved?.configServerEnabled == true &&
+        val wasAlive = managerAlive()
+        var alive = wasAlive
+        if (alive && scriptUpdated) {
+            stopManagerBlocking()
+            alive = false
+        }
+        val keepConnection = wasAlive && saved?.configServerEnabled == true &&
             saved.rawConfigServerUrl == settings.configServerUrl.trim()
         val options = optionsFromSettings(settings, keepConnection || settings.configServerAutoConnect)
         if (alive && saved?.sameLaunchOptions(options) != true) restartManagerForOptions(options)
@@ -535,7 +544,7 @@ class RootTierController(private val context: Context) {
         val command = buildString {
             append("RUST_LOG=")
             append(shq(CoreLogLevel.rustFilter(logLevel)))
-            append(" ET_CONSOLE_LOG_LEVEL=")
+            append(" ET_FILE_LOG_LEVEL=off ET_CONSOLE_LOG_LEVEL=")
             append(shq(CoreLogLevel.rustLevel(logLevel)))
             append(' ')
             append("sh ")
@@ -876,14 +885,14 @@ class RootTierController(private val context: Context) {
             val raw = events.optString(index)
             val parsedEvent = runCatching { JSONObject(raw) }.getOrNull()
             if (parsedEvent == null) {
-                if (raw.isNotBlank()) logs += raw
+                if (raw.isNotBlank()) logs += LogTime.normalize(raw)
                 continue
             }
             val event = parsedEvent.optJSONObject("event")
             val message = event?.optString("msg").orEmpty()
                 .ifBlank { event?.optString("message").orEmpty() }
                 .ifBlank { event?.toString().orEmpty() }
-            if (message.isNotBlank()) logs += message
+            if (message.isNotBlank()) logs += LogTime.normalize(message)
         }
 
         return ParsedInstanceInfo(
@@ -1103,25 +1112,15 @@ class RootTierController(private val context: Context) {
     private fun readManagerLogTail(options: ManagerOptions?): List<String> {
         if (CoreLogLevel.normalize(store.loadSettings().coreLogLevel) == CoreLogLevel.OFF) return emptyList()
         if (!managerLogFile.exists()) return emptyList()
-        trimManagerLog()
         val rawUrl = options?.rawConfigServerUrl.orEmpty()
         val resolvedUrl = options?.resolvedConfigServerUrl.orEmpty()
-        return runCatching { managerLogFile.readText() }
+        return runCatching { LogFiles.tail(managerLogFile) }
             .getOrDefault("")
             .lineSequence()
             .filter { it.isNotBlank() }
-            .map { redactConfigServerToken(it, rawUrl, resolvedUrl) }
+            .map { LogTime.normalize(redactConfigServerToken(it, rawUrl, resolvedUrl)) }
             .toList()
             .takeLast(400)
-    }
-
-    private fun trimManagerLog() {
-        if (managerLogFile.length() <= MAX_MANAGER_LOG_BYTES) return
-        runCatching {
-            managerLogFile.writeText(
-                managerLogFile.readText().takeLast(MAX_MANAGER_LOG_BYTES / 2)
-            )
-        }.onFailure { AppDiagnostics.warn("root", "manager log trimming failed", it) }
     }
 
     private fun filteredCoreLogs(logs: List<String>): List<String> = when (
@@ -1165,7 +1164,9 @@ class RootTierController(private val context: Context) {
     private fun ensureScript() {
         scriptFile.parentFile?.mkdirs()
         context.assets.open("root/moontier_root.sh").use { input ->
-            scriptFile.writeText(input.bufferedReader().readText().replace("\r\n", "\n"))
+            val text = input.bufferedReader().readText().replace("\r\n", "\n")
+            scriptUpdated = runCatching { scriptFile.readText() }.getOrNull() != text
+            if (scriptUpdated) scriptFile.writeText(text)
         }
         scriptFile.setExecutable(true, false)
     }
@@ -1283,7 +1284,6 @@ class RootTierController(private val context: Context) {
 
     companion object {
         private const val TAG = "MoonTierRoot"
-        private const val MAX_MANAGER_LOG_BYTES = 1024 * 1024
         private val IMPORTANT_CORE_LOG = Regex(
             "error|warn|fail|panic|closed|stop|disconnect|exit|timeout",
             RegexOption.IGNORE_CASE

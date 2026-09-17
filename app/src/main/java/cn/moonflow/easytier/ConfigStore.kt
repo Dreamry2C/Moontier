@@ -113,6 +113,9 @@ class ConfigStore(private val context: Context) {
             coreDownloadProxyEnabled = settings.coreDownloadProxyEnabled,
             coreDownloadProxies = settings.coreDownloadProxies,
             coreLogLevel = settings.coreLogLevel,
+            customLogRetention = settings.customLogRetention,
+            coreLogLimitMiB = settings.coreLogLimitMiB,
+            appLogLimitMiB = settings.appLogLimitMiB,
             configServerUrl = settings.configServerUrl,
             configServerHostname = settings.configServerHostname,
             configServerMachineId = settings.configServerMachineId,
@@ -123,6 +126,13 @@ class ConfigStore(private val context: Context) {
             keepAliveNotification = settings.keepAliveNotification
         )
         writeTextAtomic(settingsFile, merged.toJson().toString(2))
+        syncCoreLogLimit(merged)
+    }
+
+    fun syncCoreLogLimit(settings: AppSettings = loadSettings()) {
+        // The root watcher reads this atomic, numeric sidecar at its next hourly check.
+        val file = File(context.filesDir, "root/pids/manager.pid.log-limit")
+        writeTextAtomic(file, settings.coreLogLimitBytes().toString())
     }
 
     @Synchronized

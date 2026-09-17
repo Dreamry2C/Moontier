@@ -31,7 +31,7 @@ class RootAutostartService : Service() {
         taskStarted = true
         scope.launch {
             val settings = ConfigStore(applicationContext).loadSettings()
-            AppDiagnostics.initialize(applicationContext, settings.coreLogLevel)
+            AppDiagnostics.initialize(applicationContext, settings)
             AppDiagnostics.event("boot", "开机任务开始")
             val root = withContext(Dispatchers.IO) { RootManager.probe(refresh = true) }
             if (!root.available) {

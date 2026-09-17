@@ -4,8 +4,6 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 
 object CoreLogLevel {
@@ -41,22 +39,23 @@ object CoreLogLevel {
 /** Writes launcher diagnostics separately from the FFI and root-manager core logs. */
 object AppDiagnostics {
     private const val TAG = "MoonTierDiag"
-    private const val MAX_FILE_BYTES = 512 * 1024
+    private var maxFileBytes = LogRetention.DEFAULT_APP_BYTES
 
     private var logFile: File? = null
 
     @Volatile
     private var coreLogLevel = CoreLogLevel.OFF
 
-    fun initialize(context: Context, level: String = CoreLogLevel.OFF) {
+    fun initialize(context: Context, settings: AppSettings = AppSettings()) {
         synchronized(this) {
             if (logFile == null) logFile = File(context.filesDir, "diagnostics.log")
-            coreLogLevel = CoreLogLevel.normalize(level)
+            configure(settings)
         }
     }
 
-    fun configure(level: String) {
-        coreLogLevel = CoreLogLevel.normalize(level)
+    fun configure(settings: AppSettings) = synchronized(this) {
+        coreLogLevel = CoreLogLevel.normalize(settings.coreLogLevel)
+        maxFileBytes = settings.appLogLimitBytes()
     }
 
     fun info(source: String, message: String) {
@@ -85,13 +84,20 @@ object AppDiagnostics {
     }
 
     fun recent(maxChars: Int = 12_000): String = synchronized(this) {
-        val text = runCatching { logFile?.readText().orEmpty() }.getOrDefault("")
+        val text = LogTime.normalize(runCatching { logFile?.let { LogFiles.tail(it) }.orEmpty() }.getOrDefault(""))
         if (text.length <= maxChars) text else text.takeLast(maxChars)
+    }
+
+    fun preview(): String = synchronized(this) {
+        val text = runCatching { logFile?.let { LogFiles.tail(it) }.orEmpty() }.getOrDefault("")
+        LogPreview.chronological(LogTime.normalize(text))
     }
 
     fun clear() = synchronized(this) {
         runCatching { logFile?.writeText("") }
     }
+
+    fun snapshotTo(target: File) = synchronized(this) { LogFiles.snapshot(logFile, target) }
 
     fun buildReport(
         settings: AppSettings,
@@ -101,6 +107,7 @@ object AppDiagnostics {
     ): String = buildString {
         appendLine("MoonTier diagnostics")
         appendLine("generated_at=${timestamp()}")
+        appendLine("log_timezone=UTC+08:00")
         appendLine("android=${Build.VERSION.RELEASE} sdk=${Build.VERSION.SDK_INT} device=${Build.MANUFACTURER} ${Build.MODEL}")
         appendLine("mode=${if (settings.rootModeEnabled) "root" else "vpn"} core_log=${CoreLogLevel.normalize(settings.coreLogLevel)}")
         appendLine()
@@ -132,9 +139,7 @@ object AppDiagnostics {
             runCatching {
                 file.parentFile?.mkdirs()
                 file.appendText("${timestamp()} $kind/$source $message\n")
-                if (file.length() > MAX_FILE_BYTES) {
-                    file.writeText(file.readText().takeLast(MAX_FILE_BYTES / 2))
-                }
+                LogFiles.trimToLimit(file, maxFileBytes)
             }
         }
     }
@@ -142,5 +147,5 @@ object AppDiagnostics {
     private fun formatMessage(message: String, error: Throwable?): String =
         if (error == null) message else "$message\n${Log.getStackTraceString(error)}"
 
-    private fun timestamp(): String = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+    private fun timestamp(): String = LogTime.now()
 }

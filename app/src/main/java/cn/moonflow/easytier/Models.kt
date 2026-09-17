@@ -231,6 +231,9 @@ data class AppSettings(
     val coreDownloadProxyEnabled: Boolean = false,
     val coreDownloadProxies: List<String> = DEFAULT_CORE_DOWNLOAD_PROXIES,
     val coreLogLevel: String = CoreLogLevel.OFF,
+    val customLogRetention: Boolean = false,
+    val coreLogLimitMiB: String = "10",
+    val appLogLimitMiB: String = "0.5",
     val configServerUrl: String = "",
     val configServerHostname: String = "",
     val configServerMachineId: String = "",
@@ -240,6 +243,14 @@ data class AppSettings(
     val bootAdbEnabled: Boolean = false,
     val keepAliveNotification: Boolean = false
 ) {
+    fun coreLogLimitBytes(): Long = if (customLogRetention) {
+        LogRetention.parseMiB(coreLogLimitMiB) ?: LogRetention.DEFAULT_CORE_BYTES
+    } else LogRetention.DEFAULT_CORE_BYTES
+
+    fun appLogLimitBytes(): Long = if (customLogRetention) {
+        LogRetention.parseMiB(appLogLimitMiB) ?: LogRetention.DEFAULT_APP_BYTES
+    } else LogRetention.DEFAULT_APP_BYTES
+
     fun toJson(): JSONObject = JSONObject()
         .put("auto_sync_official_servers", autoSyncOfficialServers)
         .put("exit_node_auto_routes", exitNodeAutoRoutes)
@@ -249,6 +260,9 @@ data class AppSettings(
         .put("core_download_proxy_enabled", coreDownloadProxyEnabled)
         .put("core_download_proxies", coreDownloadProxies.toJsonArray())
         .put("core_log_level", CoreLogLevel.normalize(coreLogLevel))
+        .put("custom_log_retention", customLogRetention)
+        .put("core_log_limit_mib", coreLogLimitMiB)
+        .put("app_log_limit_mib", appLogLimitMiB)
         .put("config_server_url", configServerUrl)
         .put("config_server_hostname", configServerHostname)
         .put("config_server_machine_id", configServerMachineId)
@@ -272,6 +286,9 @@ data class AppSettings(
                 DEFAULT_CORE_DOWNLOAD_PROXIES
             },
             coreLogLevel = CoreLogLevel.normalize(obj.optString("core_log_level", CoreLogLevel.OFF)),
+            customLogRetention = obj.optBoolean("custom_log_retention", false),
+            coreLogLimitMiB = obj.optString("core_log_limit_mib", "10"),
+            appLogLimitMiB = obj.optString("app_log_limit_mib", "0.5"),
             configServerUrl = obj.optString("config_server_url", ""),
             configServerHostname = obj.optString("config_server_hostname", ""),
             configServerMachineId = obj.optString("config_server_machine_id", ""),

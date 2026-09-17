@@ -14,7 +14,7 @@ class BootReceiver : BroadcastReceiver() {
         }
         val restoreRootNetwork = settings.bootAutoStart && settings.rootModeEnabled
         if (!restoreRootNetwork && !settings.bootAdbEnabled) return
-        AppDiagnostics.initialize(context.applicationContext, settings.coreLogLevel)
+        AppDiagnostics.initialize(context.applicationContext, settings)
         val serviceIntent = Intent(context, RootAutostartService::class.java)
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(serviceIntent)
