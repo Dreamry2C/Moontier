@@ -16,7 +16,7 @@ class EasyTierVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        AppDiagnostics.initialize(applicationContext, ConfigStore(applicationContext).loadSettings().coreLogLevel)
+        AppDiagnostics.initialize(applicationContext, ConfigStore(applicationContext).loadSettings())
         if (intent?.action == ACTION_STOP) {
             AppDiagnostics.event("vpn", "VPN service stop requested")
             shutdownVpn()

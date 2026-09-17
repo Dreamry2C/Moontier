@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import androidx.lifecycle.lifecycleScope
 import android.view.View
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -30,6 +31,8 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -51,6 +54,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -61,6 +65,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
@@ -99,19 +106,26 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -124,6 +138,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: ConfigStore
@@ -186,18 +201,25 @@ class MainActivity : ComponentActivity() {
     }
 
     private val exportDiagnosticsLauncher = registerForActivityResult(
-        ActivityResultContracts.CreateDocument("text/plain")
+        ActivityResultContracts.CreateDocument("application/zip")
     ) { uri ->
         if (uri == null) return@registerForActivityResult
-        runCatching {
-            contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(pendingDiagnosticText) }
-                ?: error("无法写入日志文件")
-        }.onSuccess {
-            AppDiagnostics.info("launcher", "diagnostic report exported")
-            onFileMessage?.invoke("导出完成", "应用日志已写入文件")
-        }.onFailure {
-            AppDiagnostics.error("launcher", "diagnostic report export failed", it)
-            onFileMessage?.invoke("导出失败", it.message ?: "无法写入日志文件")
+        val report = pendingDiagnosticText
+        lifecycleScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    contentResolver.openOutputStream(uri, "wt")?.use { output ->
+                        DiagnosticsArchive.write(output, cacheDir, report, rootController.rawCoreLog(),
+                            android.os.Process.myPid(), AppDiagnostics::snapshotTo)
+                    } ?: error("无法写入日志文件")
+                }
+            }.onSuccess {
+                AppDiagnostics.info("launcher", "diagnostic archive exported")
+                onFileMessage?.invoke("导出完成", "ZIP 包含应用日志、核心日志和完整合并诊断报告，时间统一为 UTC+8")
+            }.onFailure {
+                AppDiagnostics.error("launcher", "diagnostic archive export failed", it)
+                onFileMessage?.invoke("导出失败", it.message ?: "无法写入日志文件")
+            }
         }
     }
 
@@ -205,8 +227,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingDiagnosticText = savedInstanceState?.getString("diagnostic_report").orEmpty()
         store = ConfigStore(applicationContext)
-        AppDiagnostics.initialize(applicationContext, store.loadSettings().coreLogLevel)
+        AppDiagnostics.initialize(applicationContext, store.loadSettings())
         KeepAliveService.sync(applicationContext, store.loadSettings().keepAliveNotification)
         installUncaughtExceptionHandler()
         AppDiagnostics.event("launcher", "MainActivity created")
@@ -230,7 +253,7 @@ class MainActivity : ComponentActivity() {
                 },
                 exportDiagnostics = { report ->
                     pendingDiagnosticText = report
-                    exportDiagnosticsLauncher.launch("moontier-diagnostics.txt")
+                    exportDiagnosticsLauncher.launch("moontier-diagnostics.zip")
                 },
                 bindImportHandler = { imported, message ->
                     onImportedConfig = imported
@@ -243,6 +266,11 @@ class MainActivity : ComponentActivity() {
             override fun onStart(owner: LifecycleOwner) { isForeground = true }
             override fun onStop(owner: LifecycleOwner) { isForeground = false }
         })
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("diagnostic_report", pendingDiagnosticText)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onDestroy() {
@@ -403,8 +431,10 @@ private fun MoonTierApp(
         settings = next
         store.saveSettings(next)
         rootController.configServerSettingsChanged(previous, next)
-        KeepAliveService.sync(appContext, next.keepAliveNotification)
-        AppDiagnostics.configure(next.coreLogLevel)
+        if (previous.keepAliveNotification != next.keepAliveNotification) {
+            KeepAliveService.sync(appContext, next.keepAliveNotification)
+        }
+        AppDiagnostics.configure(next)
         if (logLevelChanged) {
             controller.updateLogLevel(next.coreLogLevel)
             rootController.updateLogLevel(next.coreLogLevel)
@@ -507,6 +537,7 @@ private fun MoonTierApp(
                     )
                 } else {
                     MainTabs(
+                        isForeground = isForeground,
                         palette = palette,
                         nodesExpanded = nodesExpanded,
                         onNodesExpandedChange = { nodesExpanded = it },
@@ -596,7 +627,7 @@ private fun MoonTierApp(
                                     settings = settings,
                                     runtime = runtime,
                                     root = rootController.state,
-                                    managerLog = rootController.diagnosticLogTail()
+                                    managerLog = emptyList()
                                 )
                             )
                         }
@@ -636,6 +667,7 @@ private fun ApplySystemBars(palette: Palette, darkMode: Boolean) {
 
 @Composable
 private fun MainTabs(
+    isForeground: Boolean,
     palette: Palette,
     nodesExpanded: Boolean,
     onNodesExpandedChange: (Boolean) -> Unit,
@@ -729,6 +761,7 @@ private fun MainTabs(
                         onSyncOfficial = onSyncOfficial
                     )
                     else -> SettingsPage(
+                        isForeground = isForeground,
                         palette = palette,
                         settings = settings,
                         rootController = rootController,
@@ -1583,6 +1616,7 @@ private fun ServersPage(
 
 @Composable
 private fun SettingsPage(
+    isForeground: Boolean,
     palette: Palette,
     settings: AppSettings,
     rootController: RootTierController,
@@ -1596,13 +1630,18 @@ private fun SettingsPage(
     var disclaimer by remember { mutableStateOf(false) }
     var logExpanded by remember { mutableStateOf(false) }
     var appLogRefreshing by remember { mutableStateOf(false) }
-    var appLogText by remember { mutableStateOf(AppDiagnostics.recent(8_000)) }
+    var appLogText by remember { mutableStateOf("") }
+    var logBottomRequest by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val core = rootController.state.core
 
-    LaunchedEffect(logExpanded) {
-        if (logExpanded) {
-            appLogText = withContext(Dispatchers.IO) { AppDiagnostics.recent(8_000) }
+    LaunchedEffect(logExpanded, isForeground) {
+        if (logExpanded && isForeground) {
+            logBottomRequest++
+            while (isActive) {
+                appLogText = withContext(Dispatchers.IO) { AppDiagnostics.preview() }
+                delay(2_000)
+            }
         }
     }
 
@@ -1740,8 +1779,9 @@ private fun SettingsPage(
                                         appLogRefreshing = true
                                         try {
                                             appLogText = withContext(Dispatchers.IO) {
-                                                AppDiagnostics.recent(8_000)
+                                                AppDiagnostics.preview()
                                             }
+                                            logBottomRequest++
                                             delay(80)
                                         } finally {
                                             appLogRefreshing = false
@@ -1750,7 +1790,7 @@ private fun SettingsPage(
                                 }
                             )
                             QButton(
-                                text = "导出日志",
+                                text = "导出日志 ZIP",
                                 palette = palette,
                                 modifier = Modifier.weight(1f),
                                 compact = true,
@@ -1759,14 +1799,11 @@ private fun SettingsPage(
                             )
                         }
                         Spacer(Modifier.height(12.dp))
-                        Text(
-                            if (appLogText.isBlank()) "暂无记录" else appLogText,
-                            color = palette.subText,
-                            fontSize = 11.sp,
-                            lineHeight = 16.sp,
-                            maxLines = 30,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        LogRetentionSettings(settings, palette, onSettings)
+                        Spacer(Modifier.height(20.dp))
+                        Text("日志", color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Spacer(Modifier.height(8.dp))
+                        LogViewport(appLogText, logBottomRequest, palette)
                     }
                 }
             }
@@ -2609,6 +2646,131 @@ private fun QButton(
 }
 
 @Composable
+private fun LogViewport(text: String, bottomRequest: Int, palette: Palette) {
+    val scroll = rememberScrollState()
+    var followBottom by remember { mutableStateOf(true) }
+    var movingToBottom by remember { mutableStateOf(false) }
+    var displayedText by remember { mutableStateOf(text) }
+
+    LaunchedEffect(scroll) {
+        snapshotFlow { scroll.value to scroll.isScrollInProgress }.collect { (position, scrolling) ->
+            if (scrolling && !movingToBottom) followBottom = position >= scroll.maxValue - 2
+        }
+    }
+    LaunchedEffect(bottomRequest) { followBottom = true }
+    // Keep the history being read stable while new lines are written to the file.
+    LaunchedEffect(text, followBottom) { if (followBottom) displayedText = text }
+    LaunchedEffect(displayedText, bottomRequest, scroll.maxValue, followBottom) {
+        if (followBottom && !scroll.isScrollInProgress) {
+            movingToBottom = true
+            try { scroll.scrollTo(scroll.maxValue) } finally { movingToBottom = false }
+        }
+    }
+
+    Row(Modifier.fillMaxWidth().height(280.dp)) {
+        Box(
+            Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(10.dp))
+                .background(palette.surfaceVariant).border(0.7.dp, palette.border, RoundedCornerShape(10.dp))
+                .padding(start = 8.dp, top = 8.dp, bottom = 8.dp)
+        ) {
+            Text(
+                displayedText.ifBlank { "暂无记录" },
+                modifier = Modifier.fillMaxSize().padding(end = 18.dp).verticalScroll(scroll),
+                color = palette.subText, fontSize = 11.sp, lineHeight = 16.sp
+            )
+            LogScrollbar(scroll, palette, Modifier.align(Alignment.CenterEnd).width(16.dp).fillMaxHeight()) {
+                followBottom = it
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        // No child gesture handler here: vertical swipes go directly to the settings page.
+        Spacer(Modifier.width(40.dp).fillMaxHeight().semantics { contentDescription = "页面滚动区域" })
+    }
+}
+
+@Composable
+private fun LogScrollbar(
+    scroll: ScrollState, palette: Palette, modifier: Modifier = Modifier, onFollowChanged: (Boolean) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    fun thumbHeight(height: Float, minHeight: Float): Float =
+        (height * height / (height + scroll.maxValue)).coerceIn(minOf(height, minHeight), height)
+
+    Canvas(modifier.semantics { contentDescription = "日志滚动条" }.pointerInput(scroll) {
+        var pointerY = 0f
+        var grabOffset = 0f
+        fun moveThumb() {
+            val height = size.height.toFloat()
+            val thumb = thumbHeight(height, 24.dp.toPx())
+            if (scroll.maxValue <= 0 || height <= thumb) return
+            val target = ((pointerY - grabOffset) / (height - thumb) * scroll.maxValue)
+                .roundToInt().coerceIn(0, scroll.maxValue)
+            onFollowChanged(target >= scroll.maxValue - 2)
+            scope.launch { scroll.scrollTo(target) }
+        }
+        detectVerticalDragGestures(
+            onDragStart = { point ->
+                pointerY = point.y
+                val thumb = thumbHeight(size.height.toFloat(), 24.dp.toPx())
+                val top = if (scroll.maxValue > 0) scroll.value.toFloat() / scroll.maxValue * (size.height - thumb) else 0f
+                grabOffset = if (point.y in top..(top + thumb)) point.y - top else thumb / 2
+                moveThumb()
+            },
+            onVerticalDrag = { change, amount ->
+                if (scroll.maxValue > 0) {
+                    change.consume()
+                    pointerY += amount
+                    moveThumb()
+                }
+            }
+        )
+    }) {
+        if (scroll.maxValue <= 0 || size.height <= 0) return@Canvas
+        val thumb = thumbHeight(size.height, 24.dp.toPx())
+        val top = scroll.value.toFloat() / scroll.maxValue * (size.height - thumb)
+        val width = 4.dp.toPx()
+        val left = (size.width - width) / 2
+        drawRoundRect(palette.border, Offset(left, 0f), Size(width, size.height), CornerRadius(width))
+        drawRoundRect(palette.subText.copy(alpha = 0.65f), Offset(left, top), Size(width, thumb), CornerRadius(width))
+    }
+}
+
+@Composable
+private fun LogRetentionSettings(settings: AppSettings, palette: Palette, onSettings: (AppSettings) -> Unit) {
+    var coreLimit by remember(settings.coreLogLimitMiB) { mutableStateOf(settings.coreLogLimitMiB) }
+    var appLimit by remember(settings.appLogLimitMiB) { mutableStateOf(settings.appLogLimitMiB) }
+    val valid = LogRetention.parseMiB(coreLimit) != null && LogRetention.parseMiB(appLimit) != null
+    val changed = coreLimit != settings.coreLogLimitMiB || appLimit != settings.appLogLimitMiB
+    SwitchRow("自定义日志容量", settings.customLogRetention, palette) {
+        onSettings(settings.copy(customLogRetention = it))
+    }
+    if (settings.customLogRetention) {
+        Text("Core 日志上限（MiB）", color = palette.text, fontSize = 13.sp)
+        QTextField(coreLimit, "0 或留空：不限制", palette,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)) { coreLimit = it }
+        Spacer(Modifier.height(8.dp))
+        Text("App 管理日志上限（MiB）", color = palette.text, fontSize = 13.sp)
+        QTextField(appLimit, "0 或留空：不限制", palette,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)) { appLimit = it }
+        Spacer(Modifier.height(8.dp))
+        if (!valid) {
+            Text("请输入有效的非负数，例如 10 或 0.5；留空表示不限制。", color = palette.error, fontSize = 12.sp)
+        }
+        QButton(
+            text = if (changed) "保存容量设置" else "容量设置已保存",
+            palette = palette, compact = true, enabled = valid && changed,
+            onClick = { onSettings(settings.copy(coreLogLimitMiB = coreLimit.trim(), appLogLimitMiB = appLimit.trim())) }
+        )
+    }
+    Text(
+        (if (settings.customLogRetention) "0 或留空不限制大小；超限保留上限的一半。" else
+            "默认 Core 10 MiB、App 管理日志 0.5 MiB；超限保留上限的一半。") +
+            "\nCore 在下次启动或每 60 分钟检查时生效；App 管理日志在下次写入时生效。",
+        color = palette.subText, fontSize = 12.sp, lineHeight = 18.sp
+    )
+}
+
+@Composable
 private fun QTextField(
     value: String,
     placeholder: String,
@@ -2616,6 +2778,7 @@ private fun QTextField(
     modifier: Modifier = Modifier,
     password: Boolean = false,
     singleLine: Boolean = true,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     onValueChange: (String) -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -2633,6 +2796,7 @@ private fun QTextField(
             value = value,
             onValueChange = onValueChange,
             singleLine = singleLine,
+            keyboardOptions = keyboardOptions,
             visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
             textStyle = TextStyle(color = palette.text, fontSize = 14.sp),
             modifier = Modifier

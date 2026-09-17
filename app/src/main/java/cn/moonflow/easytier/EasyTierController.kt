@@ -505,7 +505,7 @@ class EasyTierController(
             .sortedBy { it.first }
             .filter { lastLogKey.isBlank() || it.first > lastLogKey }
         if (fresh.isNotEmpty()) lastLogKey = fresh.last().first
-        return fresh.map { it.second }
+        return fresh.map { LogTime.normalize(it.second) }
     }
 
     private fun filterCoreLogs(logs: List<String>, level: String): List<String> = when (CoreLogLevel.normalize(level)) {

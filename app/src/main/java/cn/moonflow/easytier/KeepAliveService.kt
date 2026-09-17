@@ -11,23 +11,34 @@ import android.os.Build
 import android.os.IBinder
 
 class KeepAliveService : Service() {
+    private var foregroundStarted = false
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!ConfigStore(applicationContext).loadSettings().keepAliveNotification) {
+        val settings = ConfigStore(applicationContext).loadSettings()
+        // A queued foreground-service request must be acknowledged even if the switch was just disabled.
+        startForeground(NOTIFICATION_ID, createNotification())
+        if (!settings.keepAliveNotification) {
             stopSelf(startId)
             return START_NOT_STICKY
         }
-        startForeground(NOTIFICATION_ID, createNotification())
-        AppDiagnostics.event("keepalive", "增强保活通知已启动")
+        if (!foregroundStarted) {
+            foregroundStarted = true
+            AppDiagnostics.initialize(applicationContext, settings)
+            AppDiagnostics.event("keepalive", "增强保活通知已启动")
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
-        AppDiagnostics.event("keepalive", "增强保活通知已停止")
+        if (foregroundStarted) {
+            foregroundStarted = false
+            AppDiagnostics.event("keepalive", "增强保活通知已停止")
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {

@@ -7,6 +7,7 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Minimal protobuf wire codec. Unknown fields are retained/skipped, never interpreted as text. */
 internal class RpcMessage(val data: ByteArray = byteArrayOf()) {
@@ -89,23 +90,27 @@ internal class RpcMessage(val data: ByteArray = byteArrayOf()) {
  * Calls are serialized; a failed mutation is never automatically replayed.
  */
 internal class RootRpc(private val port: Int = 14999) : AutoCloseable {
-    private var socket: Socket? = null
+    @Volatile private var socket: Socket? = null
+    private val generation = AtomicInteger()
     private var transaction = 0L
 
-    @Synchronized
     override fun close() {
-        runCatching { socket?.close() }
+        generation.incrementAndGet()
+        val previous = socket
         socket = null
+        runCatching { previous?.close() }
     }
 
     @Synchronized
     fun call(method: Int, request: RpcMessage = RpcMessage(), timeoutMs: Int = 8000): RpcMessage {
         try {
+            val expectedGeneration = generation.get()
             val connection = socket ?: Socket().also {
                 try {
                     it.connect(InetSocketAddress("127.0.0.1", port), 2000)
                     it.tcpNoDelay = true
                     socket = it
+                    check(generation.get() == expectedGeneration) { "RPC connection cancelled" }
                 } catch (error: Exception) { it.close(); throw error }
             }
             val deadline = System.nanoTime() + timeoutMs * 1_000_000L

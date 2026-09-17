@@ -4,8 +4,28 @@ import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.util.UUID
+import java.net.ServerSocket
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
 
 class RootRpcTest {
+    @Test fun closeInterruptsAnUnresponsiveCoreWithoutBlockingTheUi() {
+        ServerSocket(0).use { server ->
+            server.soTimeout = 2000
+            val rpc = RootRpc(server.localPort)
+            val call = FutureTask { runCatching { rpc.call(4) }.isFailure }
+            Thread(call).apply { isDaemon = true; start() }
+            server.accept().use { peer ->
+                peer.soTimeout = 2000
+                assertTrue(peer.getInputStream().read() >= 0)
+                val start = System.nanoTime()
+                rpc.close()
+                assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start) < 1000)
+                assertTrue(call.get(2, TimeUnit.SECONDS))
+            }
+        }
+    }
+
     @Test fun rejectsMalformedElfAndDetectsNativeArchitecture() {
         assertNull(RootArchitecture.fromHeader("not an executable".toByteArray()))
         val header = ByteArray(20)
