@@ -13,6 +13,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -34,93 +40,119 @@ class EasyTierController(
     private var directCoreIps = emptySet<String>()
     private var lastLogKey = ""
     private var missedPolls = 0
-    private var stalledPolls = 0
+    private var runningSinceMs = SystemClock.elapsedRealtime()
+    private var lastDirectLookupMs = -30_000L
+    private var released = false
     private val _pollIntervalMs = kotlinx.coroutines.flow.MutableStateFlow(30000L)
 
     var state by mutableStateOf(RuntimeState())
         private set
 
+    private fun launchLifecycle(block: suspend () -> Unit): Job = scope.launch {
+        lifecycleMutex.withLock { block() }
+    }
+
     fun start(config: NetworkConfig) {
-        if (state.starting || state.stopping) return
+        if (released || state.starting || state.stopping) return
         Log.i(TAG, "FFI start requested id=${config.id} running=${state.running}")
         AppDiagnostics.event("ffi", "start requested id=${config.id} name=${config.displayName}")
         state = state.copy(starting = true, statusText = "正在启动 ${config.displayName}")
-        scope.launch {
-            val startedAt = SystemClock.elapsedRealtime()
-            val previousConfigId = state.runningConfigId
-            if (state.running) stop(wait = true)
+        launchLifecycle {
+            var attemptedStart = false
+            var adopted = false
+            try {
+                val startedAt = SystemClock.elapsedRealtime()
+                val previousConfigId = state.runningConfigId
+                if (state.running) stop(wait = true)
 
-            val normalized = config
-            val runtimeConfig = normalized.withRuntimeHostname(context)
-            runningConfig = runtimeConfig
-            directCoreIps = emptySet()
-            vpnSignature = ""
-            lastLogKey = ""
-            missedPolls = 0
-            stalledPolls = 0
-            state = RuntimeState(starting = true, statusText = "正在启动 ${normalized.displayName}")
+                val normalized = config
+                val runtimeConfig = normalized.withRuntimeHostname(context)
+                runningConfig = runtimeConfig
+                directCoreIps = emptySet()
+                vpnSignature = ""
+                lastLogKey = ""
+                missedPolls = 0
+                runningSinceMs = SystemClock.elapsedRealtime()
+                lastDirectLookupMs = -30_000L
+                state = RuntimeState(starting = true, statusText = "正在启动 ${normalized.displayName}")
 
-            val toml = TomlCodec.build(runtimeConfig)
-            val configuredLogLevel = CoreLogLevel.normalize(store.loadSettings().coreLogLevel)
-            val parseCode = runCatching {
-                withContext(Dispatchers.IO) {
-                    NativeEasyTier.setLogLevel(configuredLogLevel)
-                    NativeEasyTier.parseConfig(toml)
+                val toml = TomlCodec.build(runtimeConfig)
+                val configuredLogLevel = CoreLogLevel.normalize(store.loadSettings().coreLogLevel)
+                val parseCode = runCatching {
+                    withContext(Dispatchers.IO) {
+                        NativeEasyTier.setLogLevel(configuredLogLevel)
+                        NativeEasyTier.parseConfig(toml)
+                    }
+                }.getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    failStart("配置解析异常: ${error.message ?: "未知错误"}")
+                    return@launchLifecycle
                 }
-            }.getOrElse { error ->
-                failStart("配置解析异常: ${error.message ?: "未知错误"}")
-                return@launch
-            }
-            if (parseCode != 0) {
-                failStart("配置解析失败: ${NativeEasyTier.getLastError().orEmpty()}")
-                return@launch
-            }
+                if (parseCode != 0) {
+                    failStart("配置解析失败: ${NativeEasyTier.getLastError().orEmpty()}")
+                    return@launchLifecycle
+                }
 
-            val code = runCatching {
-                withContext(Dispatchers.IO) { NativeEasyTier.runNetworkInstance(toml) }
-            }.getOrElse { error ->
-                failStart("启动异常: ${error.message ?: "未知错误"}")
-                return@launch
-            }
-            if (code != 0) {
-                failStart("启动失败: ${NativeEasyTier.getLastError().orEmpty()}")
-                return@launch
-            }
-            Log.i(TAG, "FFI core ${runtimeConfig.id} started in ${SystemClock.elapsedRealtime() - startedAt}ms")
-            AppDiagnostics.event("ffi", "core started id=${runtimeConfig.id} level=$configuredLogLevel elapsed=${SystemClock.elapsedRealtime() - startedAt}ms")
+                val code = runCatching {
+                    withContext(NonCancellable + Dispatchers.IO) {
+                        attemptedStart = true
+                        NativeEasyTier.runNetworkInstance(toml)
+                    }
+                }.getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    failStart("启动异常: ${error.message ?: "未知错误"}")
+                    return@launchLifecycle
+                }
+                if (code != 0) {
+                    failStart("启动失败: ${NativeEasyTier.getLastError().orEmpty()}")
+                    return@launchLifecycle
+                }
+                currentCoroutineContext().ensureActive()
+                Log.i(TAG, "FFI core ${runtimeConfig.id} started in ${SystemClock.elapsedRealtime() - startedAt}ms")
+                AppDiagnostics.event("ffi", "core started id=${runtimeConfig.id} level=$configuredLogLevel elapsed=${SystemClock.elapsedRealtime() - startedAt}ms")
 
-            state = state.copy(
-                running = true,
-                starting = false,
-                runningConfigId = runtimeConfig.id,
-                statusText = "实例运行中: ${normalized.displayName}",
-                logs = listOf("EasyTier 日志级别: ${CoreLogLevel.label(configuredLogLevel)}", "网络实例启动成功")
-            )
-            if (previousConfigId.isNotBlank() && previousConfigId != runtimeConfig.id) {
-                store.updateConfigRunningState(previousConfigId, false)
+                state = state.copy(
+                    running = true,
+                    starting = false,
+                    runningConfigId = runtimeConfig.id,
+                    statusText = "实例运行中: ${normalized.displayName}",
+                    logs = listOf("EasyTier 日志级别: ${CoreLogLevel.label(configuredLogLevel)}", "网络实例启动成功")
+                )
+                if (previousConfigId.isNotBlank() && previousConfigId != runtimeConfig.id) {
+                    store.updateConfigRunningState(previousConfigId, false)
+                }
+                store.updateConfigRunningState(runtimeConfig.id, true)
+                pollJob?.cancel()
+                pollJob = scope.launch { pollLoop() }
+                adopted = true
+            } finally {
+                // Keep cleanup under the shared lifecycle lock so an abandoned start
+                // cannot stop a newer controller's instance during Activity recreation.
+                if (attemptedStart && !adopted) withContext(NonCancellable + Dispatchers.IO) {
+                    runCatching { NativeEasyTier.stopAllInstances() }
+                }
             }
-            store.updateConfigRunningState(runtimeConfig.id, true)
-            pollJob?.cancel()
-            pollJob = scope.launch { pollLoop() }
         }
     }
 
     fun stop() {
-        scope.launch { stop(wait = false) }
+        launchLifecycle { stop(wait = false) }
     }
 
     fun attachIfRunning(configs: List<NetworkConfig>) {
-        if (state.running || state.starting || state.stopping || pollJob != null) return
-        scope.launch {
+        if (released || state.running || state.starting || state.stopping || pollJob != null) return
+        launchLifecycle {
+            if (state.running || state.starting || state.stopping || pollJob != null) return@launchLifecycle
             val raw = withContext(Dispatchers.IO) { NativeEasyTier.collectNetworkInfos(8).orEmpty() }
-            val outer = runCatching { JSONObject(raw) }.getOrNull() ?: return@launch
-            val config = configs.firstOrNull { outer.optJSONObject(it.instanceName) != null } ?: return@launch
+            val outer = runCatching { JSONObject(raw) }.getOrNull() ?: return@launchLifecycle
+            val config = configs.firstOrNull { outer.optJSONObject(it.instanceName) != null } ?: return@launchLifecycle
             runningConfig = config
             directCoreIps = emptySet()
             vpnSignature = ""
             lastLogKey = ""
             missedPolls = 0
-            stalledPolls = 0
+            runningSinceMs = SystemClock.elapsedRealtime()
+            lastDirectLookupMs = -30_000L
             state = RuntimeState(
                 running = true,
                 runningConfigId = config.id,
@@ -134,7 +166,7 @@ class EasyTierController(
 
     fun onVpnPermissionDenied() {
         AppDiagnostics.warn("vpn", "VPN permission denied by user")
-        scope.launch {
+        launchLifecycle {
             stopRuntime(
                 statusText = "VPN 授权已取消",
                 logMessage = "VPN 授权已取消，网络实例已停止",
@@ -145,7 +177,7 @@ class EasyTierController(
 
     fun onVpnServiceStartFailed(error: Throwable) {
         AppDiagnostics.error("vpn", "VPN service start failed", error)
-        scope.launch {
+        launchLifecycle {
             stopRuntime(
                 statusText = "启动失败",
                 logMessage = "VPN 服务启动失败: ${error.message ?: "未知错误"}",
@@ -194,7 +226,6 @@ class EasyTierController(
         vpnSignature = ""
         directCoreIps = emptySet()
         missedPolls = 0
-        stalledPolls = 0
         if (stoppedConfigId.isNotBlank()) {
             store.updateConfigRunningState(stoppedConfigId, false)
         }
@@ -203,7 +234,9 @@ class EasyTierController(
     }
 
     fun release() {
+        released = true
         pollJob?.cancel()
+        scope.cancel()
     }
 
     private fun failStart(message: String) {
@@ -215,7 +248,6 @@ class EasyTierController(
         vpnSignature = ""
         directCoreIps = emptySet()
         missedPolls = 0
-        stalledPolls = 0
         if (configId.isNotBlank()) {
             store.updateConfigRunningState(configId, false)
         }
@@ -227,7 +259,8 @@ class EasyTierController(
             while (true) {
                 val config = runningConfig ?: return@collectLatest
                 pollOnce(config)
-                delay(if (state.localCidr.isBlank()) 500L else interval)
+                delay(PollingPolicy.vpn(interval, state.localCidr.isBlank(),
+                    SystemClock.elapsedRealtime() - runningSinceMs, config.noTun))
             }
         }
     }
@@ -250,7 +283,6 @@ class EasyTierController(
             return
         }
         missedPolls = 0
-        stalledPolls = 0
         val localCidr = extractLocalCidr(info)
         val proxyCidrs = collectPeerProxyCidrs(info)
         val nodes = parseNodes(info)
@@ -268,14 +300,10 @@ class EasyTierController(
         )
         if (logs.isNotEmpty()) next = next.copy(logs = (next.logs + logs).takeLast(240))
         state = next
-        if (state.running && localCidr.isBlank() && nodes.isEmpty()) {
-            stalledPolls++
-        } else {
-            stalledPolls = 0
-        }
 
         if (localCidr.isNotBlank() && !config.noTun) {
-            if (directCoreIps.isEmpty()) {
+            if (directCoreIps.isEmpty() && SystemClock.elapsedRealtime() - lastDirectLookupMs >= 30_000L) {
+                lastDirectLookupMs = SystemClock.elapsedRealtime()
                 directCoreIps = withContext(Dispatchers.IO) { collectDirectCoreIps(config) }
             }
             val overlayRange = Ipv4.cidrToRange(localCidr)
@@ -301,8 +329,9 @@ class EasyTierController(
                 exitNodeConfiguredCount = configuredExitNodes.size,
                 exitNodeReachableCount = reachableExitNodes.size
             )
-            if (vpnJson != vpnSignature) {
-                vpnSignature = vpnJson
+            val signature = vpnInterfaceSignature(vpnJson, Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            if (signature != vpnSignature) {
+                vpnSignature = signature
                 val routeCount = runCatching { JSONObject(vpnJson).optJSONArray("routes")?.length() ?: 0 }.getOrDefault(0)
                 val exitRouteState = when {
                     exitNodeRoutesActive -> "出口节点自动路由已开启，可达 ${reachableExitNodes.size}/${configuredExitNodes.size}"
@@ -331,7 +360,6 @@ class EasyTierController(
         vpnSignature = ""
         directCoreIps = emptySet()
         missedPolls = 0
-        stalledPolls = 0
         // 停止 VPN 服务
         val stopIntent = Intent(context, EasyTierVpnService::class.java)
             .setAction(EasyTierVpnService.ACTION_STOP)
@@ -533,13 +561,14 @@ class EasyTierController(
     }
     fun updatePollingConditions(isForeground: Boolean, expanded: Boolean) {
         _pollIntervalMs.value = when {
-            !isForeground -> 300000L
+            !isForeground -> PollingPolicy.VPN_BACKGROUND_MS
             isForeground && expanded -> 500L
             else -> 30000L
         }
     }
 
     companion object {
+        private val lifecycleMutex = Mutex()
         private const val TAG = "MoonTierCore"
         private const val MAX_EXCLUDED_CORE_IPS = 64
         private val TRANSPORT_ENDPOINT_KEY = Regex(
