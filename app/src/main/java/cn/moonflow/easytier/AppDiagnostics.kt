@@ -42,6 +42,7 @@ object AppDiagnostics {
     private var maxFileBytes = LogRetention.DEFAULT_APP_BYTES
 
     private var logFile: File? = null
+    private val previewCache = LogPreviewCache()
 
     @Volatile
     private var coreLogLevel = CoreLogLevel.OFF
@@ -83,18 +84,22 @@ object AppDiagnostics {
         if (coreLogLevel != CoreLogLevel.OFF) append("ERROR", source, formatMessage(message, error))
     }
 
-    fun recent(maxChars: Int = 12_000): String = synchronized(this) {
-        val text = LogTime.normalize(runCatching { logFile?.let { LogFiles.tail(it) }.orEmpty() }.getOrDefault(""))
-        if (text.length <= maxChars) text else text.takeLast(maxChars)
+    fun recent(maxChars: Int = 12_000): String {
+        if (maxChars <= 0) return ""
+        val file = synchronized(this) { logFile }
+        val bytes = minOf(LogFiles.PREVIEW_BYTES.toLong(), maxChars.toLong() * 4 + 256).toInt()
+        val text = LogTime.normalize(runCatching { file?.let { LogFiles.tail(it, bytes) }.orEmpty() }.getOrDefault(""))
+        return if (text.length <= maxChars) text else text.takeLast(maxChars)
     }
 
-    fun preview(): String = synchronized(this) {
-        val text = runCatching { logFile?.let { LogFiles.tail(it) }.orEmpty() }.getOrDefault("")
-        LogPreview.chronological(LogTime.normalize(text))
+    fun preview(): String {
+        val file = synchronized(this) { logFile }
+        return runCatching { previewCache.preview(file) }.getOrDefault("")
     }
 
     fun clear() = synchronized(this) {
         runCatching { logFile?.writeText("") }
+        previewCache.invalidate()
     }
 
     fun snapshotTo(target: File) = synchronized(this) { LogFiles.snapshot(logFile, target) }
@@ -141,6 +146,7 @@ object AppDiagnostics {
                 file.appendText("${timestamp()} $kind/$source $message\n")
                 LogFiles.trimToLimit(file, maxFileBytes)
             }
+            previewCache.invalidate()
         }
     }
 

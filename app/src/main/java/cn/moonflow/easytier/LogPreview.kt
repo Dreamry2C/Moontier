@@ -1,15 +1,19 @@
 package cn.moonflow.easytier
 
+import java.util.regex.Pattern
+
 internal object LogPreview {
-    private val recordStart = Regex(
+    private val recordStart = Pattern.compile(
         "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?\\+08:00 (?:INFO|EVENT|DEBUG|WARN|ERROR)/",
-        RegexOption.MULTILINE
+        Pattern.MULTILINE
     )
 
     /** Keep the newest complete records in append order; stack traces stay with their header. */
     fun chronological(text: String, maxChars: Int = 8_000): String {
         if (text.isBlank() || maxChars <= 0) return ""
-        val starts = recordStart.findAll(text).map { it.range.first }.toList()
+        val starts = ArrayList<Int>()
+        val matcher = recordStart.matcher(text)
+        while (matcher.find()) starts += matcher.start()
         if (starts.isEmpty()) return "当前记录超出预览范围，请导出完整日志。"
         val records = ArrayList<String>()
         var length = 0
