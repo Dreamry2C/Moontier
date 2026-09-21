@@ -93,7 +93,25 @@ fun buildVpnConfigJson(
         .put("exitNodeAutoRoutes", exitNodeAutoRoutes)
         .put("exitNodeCount", exitNodeConfiguredCount)
         .put("exitNodeReachableCount", exitNodeReachableCount)
-        .put("directCoreIps", directCoreIps.toList().toJsonArray())
-        .put("routes", routes.toList().cleanItems().toJsonArray())
+        .put("directCoreIps", directCoreIps.sorted().toJsonArray())
+        .put("routes", routes.toList().cleanItems().sorted().toJsonArray())
+        .toString()
+}
+
+/** Display counters do not change VpnService.Builder or its TUN attachment. */
+internal fun vpnInterfaceSignature(json: String, supportsExcludedRoutes: Boolean = true): String {
+    val source = org.json.JSONObject(json)
+    fun sorted(name: String): org.json.JSONArray {
+        val array = source.optJSONArray(name)
+        return (0 until (array?.length() ?: 0)).map { array!!.getString(it) }.distinct().sorted().toJsonArray()
+    }
+    return org.json.JSONObject()
+        .put("instanceName", source.optString("instanceName"))
+        .put("address", source.optString("address"))
+        .put("prefixLength", source.optInt("prefixLength"))
+        .put("mtu", source.optInt("mtu"))
+        .put("dns", source.optString("dns"))
+        .put("routes", sorted("routes"))
+        .put("directCoreIps", if (supportsExcludedRoutes) sorted("directCoreIps") else org.json.JSONArray())
         .toString()
 }
