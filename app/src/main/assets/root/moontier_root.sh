@@ -86,12 +86,40 @@ alive() {
     PID=$(cat "$PID_FILE" 2>/dev/null)
     case "$PID" in ''|*[!0-9]*) return 1 ;; esac
     kill -0 "$PID" 2>/dev/null || return 1
-    [ "$(readlink -f "/proc/$PID/exe" 2>/dev/null)" = "$(readlink -f "$CORE")" ] || return 1
+    # /data/data and /data/user/0 can be bind-mount aliases, not symlinks.
+    # Compare device/inode identity instead of the spelling of readlink output.
+    [ "/proc/$PID/exe" -ef "$CORE" ] || return 1
     EXPECTED_START=$(cat "${PID_FILE}.start" 2>/dev/null)
     [ -z "$EXPECTED_START" ] || [ "$(process_start "$PID")" = "$EXPECTED_START" ]
 }
 
 case "$ACTION" in
+    probe)
+        CONFIG_DIR="$1"
+        ALLOW_DISCOVERY="$2"
+        is_manager() {
+            MANAGER_ARGS=$(tr '\000' ' ' < "/proc/$1/cmdline" 2>/dev/null)
+            case " $MANAGER_ARGS " in *" --daemon "*) ;; *) return 1 ;; esac
+            MANAGER_CONFIG=$(tr '\000' '\n' < "/proc/$1/cmdline" 2>/dev/null | awk 'last=="--config-dir" {print; exit} {last=$0}')
+            [ "$MANAGER_CONFIG" -ef "$CONFIG_DIR" ] || return 1
+            case " $MANAGER_ARGS " in *" --rpc-portal 127.0.0.1:14999 "*) ;; *) return 1 ;; esac
+        }
+        if alive && is_manager "$PID"; then echo "RUNNING $PID"; exit 0; fi
+        if [ "$ALLOW_DISCOVERY" = 1 ]; then
+            for PROC in /proc/[0-9]*; do
+                [ "$PROC/exe" -ef "$CORE" ] || continue
+                FOUND_PID=${PROC##*/}
+                is_manager "$FOUND_PID" || continue
+                echo "$FOUND_PID" > "$PID_FILE"
+                process_start "$FOUND_PID" > "${PID_FILE}.start"
+                echo "RUNNING $FOUND_PID"
+                exit 0
+            done
+        fi
+        rm -f "$PID_FILE" "${PID_FILE}.start" "${PID_FILE}.watch"
+        echo STOPPED
+        exit 0
+        ;;
     trim)
         trim_logs
         exit 0
@@ -157,6 +185,8 @@ case "$ACTION" in
             kill "$STOP_PID" 2>/dev/null
             sleep 1
             if alive && [ "$PID" = "$STOP_PID" ]; then kill -9 "$STOP_PID" 2>/dev/null; fi
+            sleep 0.1
+            if alive && [ "$PID" = "$STOP_PID" ]; then echo 'Core process could not be stopped'; exit 1; fi
         fi
         exit 0
         ;;
