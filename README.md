@@ -146,6 +146,14 @@ gradle --no-daemon :app:assembleDebug
 .\build-apk.ps1
 ```
 
+构建用于发布的非调试 APK，先提交应用源码与构建配置，再执行：
+
+```powershell
+.\build-release.ps1
+```
+
+该脚本使用 Release 构建、校验并沿用已有发布签名，生成 `moontier-v<版本号>-arm64.apk`、SHA256 校验文件与构建来源信息，输出到 `.build-tools/artifacts/`。签名密钥仍保存在用户目录，不能提交到仓库。也可以用 `-SourceDir <Git 工作树路径>` 构建指定提交的源码。
+
 ## 源码结构
 
 ```text
