@@ -227,6 +227,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingVpnConfig = savedInstanceState?.getString("pending_vpn_config")
         pendingDiagnosticText = savedInstanceState?.getString("diagnostic_report").orEmpty()
         store = ConfigStore(applicationContext)
         AppDiagnostics.initialize(applicationContext, store.loadSettings())
@@ -236,10 +237,8 @@ class MainActivity : ComponentActivity() {
         controller = EasyTierController(applicationContext, store, ::requestVpn)
         rootController = RootTierController(applicationContext)
 
-        window.attributes = window.attributes.apply { preferredRefreshRate = 120f }
-
         setContent {
-            // 动态轮询：前台 30s，后台 2min
+            // 页面可见性和前后台共同控制状态刷新频率。
             MoonTierApp(
                 isForeground = isForeground,
                 store = store,
@@ -269,6 +268,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("pending_vpn_config", pendingVpnConfig)
         outState.putString("diagnostic_report", pendingDiagnosticText)
         super.onSaveInstanceState(outState)
     }
@@ -287,10 +287,16 @@ class MainActivity : ComponentActivity() {
             return
         }
         if (intent != null) {
+            val alreadyPending = pendingVpnConfig != null
             pendingVpnConfig = vpnJson
+            if (alreadyPending) return
             runCatching { vpnPermissionLauncher.launch(intent) }
-                .onFailure { controller.onVpnServiceStartFailed(it) }
+                .onFailure {
+                    pendingVpnConfig = null
+                    controller.onVpnServiceStartFailed(it)
+                }
         } else {
+            pendingVpnConfig = null
             startVpnServiceWith(vpnJson)
         }
     }
@@ -455,8 +461,10 @@ private fun MoonTierApp(
         }
     }
 
-    LaunchedEffect(isForeground, nodesExpanded) {
-        controller.updatePollingConditions(isForeground, nodesExpanded)
+    LaunchedEffect(isForeground, nodesExpanded, selectedTab, editingConfig != null) {
+        val networkVisible = selectedTab == 0 && editingConfig == null
+        controller.updatePollingConditions(isForeground, networkVisible && nodesExpanded)
+        rootController.updatePollingConditions(isForeground, networkVisible || (selectedTab == 2 && editingConfig == null))
     }
 
     LaunchedEffect(Unit) {
@@ -949,7 +957,7 @@ private fun RootNetworkPage(
                 RootConfigSelect(
                     configs = configs,
                     selectedId = current.id,
-                    runningIds = instances.map { it.configId }.toSet(),
+                    runningIds = instances.filter { it.running }.map { it.configId }.toSet(),
                     palette = palette,
                     onSelected = onRootConfigSelected
                 )
