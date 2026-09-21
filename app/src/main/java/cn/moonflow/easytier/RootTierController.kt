@@ -14,11 +14,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -37,12 +40,22 @@ class RootTierController(private val context: Context) {
     private val managerLogFile = File(logsDir, "manager.log")
     private val managerPidFile = File(pidsDir, "manager.pid")
     private val managerMetaFile = File(metaDir, "manager.json")
-    private val managerMutex = Mutex()
+    private val managerMutex = sharedManagerMutex
     private val managerRpc = RootRpcManager()
     private var scriptUpdated = false
     private var pollJob: Job? = null
     private var lastRootCidr = ""
     private var lastRootExitRoute = false
+    private val pollWakeup = Channel<Unit>(Channel.CONFLATED)
+    private var pollForeground = true
+    private var pollVisible = true
+    private var waitingSince = SystemClock.elapsedRealtime()
+    private var pollFailures = 0
+    private var observedManager = false
+    private var cachedManagerPid = 0L
+    private var lastProcessProbe = -10_000L
+    @Volatile private var commandRevision = 0L
+    private var commandCount = 0
 
     var state by mutableStateOf(RootTierState())
         private set
@@ -65,6 +78,7 @@ class RootTierController(private val context: Context) {
                     configServer = refreshed.configServer
                 )
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 Log.e(TAG, "Root manager initialization failed", error)
                 state = state.copy(managerError = error.message ?: "本地 Core 初始化失败")
             }
@@ -76,6 +90,13 @@ class RootTierController(private val context: Context) {
         pollJob?.cancel()
         scope.cancel()
         managerRpc.close()
+    }
+
+    fun updatePollingConditions(isForeground: Boolean, visible: Boolean) {
+        if (pollForeground == isForeground && pollVisible == visible) return
+        pollForeground = isForeground
+        pollVisible = visible
+        pollWakeup.trySend(Unit)
     }
 
     fun diagnosticLogTail(): List<String> = readManagerLogTail(loadManagerOptions())
@@ -91,6 +112,18 @@ class RootTierController(private val context: Context) {
         }
     }
 
+    private fun launchCommand(mutatesManager: Boolean = true, block: suspend () -> Unit): Job = scope.launch {
+        if (mutatesManager) {
+            commandRevision++
+            commandCount++
+            lastProcessProbe = -10_000L
+        }
+        try { block() } finally {
+            if (mutatesManager) commandCount--
+            pollWakeup.trySend(Unit)
+        }
+    }
+
     fun updateLogLevel(level: String) {
         val normalized = CoreLogLevel.normalize(level)
         if (normalized == CoreLogLevel.OFF) {
@@ -99,7 +132,7 @@ class RootTierController(private val context: Context) {
                 configServer = state.configServer.copy(logs = emptyList())
             )
         }
-        scope.launch {
+        launchCommand {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     managerMutex.withLock {
@@ -129,7 +162,7 @@ class RootTierController(private val context: Context) {
     }
 
     fun checkCoreUpdate() {
-        scope.launch {
+        launchCommand(mutatesManager = false) {
             state = state.copy(core = state.core.copy(checking = true, message = ""))
             val settings = store.loadSettings()
             val latest = withContext(Dispatchers.IO) {
@@ -155,7 +188,7 @@ class RootTierController(private val context: Context) {
     private fun installCore(uri: Uri?) {
         if (state.core.installing) return
         state = state.copy(core = state.core.copy(installing = true, progress = 0, message = ""))
-        scope.launch {
+        launchCommand {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     managerMutex.withLock {
@@ -206,8 +239,9 @@ class RootTierController(private val context: Context) {
             starting = true,
             logs = listOf("正在通过共享 manager 启动实例")
         )
-        state = state.copy(instances = state.instances.filterNot { it.configId == config.id } + starting)
-        scope.launch {
+        waitingSince = SystemClock.elapsedRealtime()
+        state = state.copy(managerError = "", instances = state.instances.filterNot { it.configId == config.id } + starting)
+        launchCommand {
             val startedAt = SystemClock.elapsedRealtime()
             val result = runCatching {
                 withContext(Dispatchers.IO) {
@@ -251,7 +285,7 @@ class RootTierController(private val context: Context) {
                 if (it.configId == configId) it.copy(stopping = true, error = "") else it
             }
         )
-        scope.launch {
+        launchCommand {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     managerMutex.withLock { stopBlocking(configId) }
@@ -286,28 +320,29 @@ class RootTierController(private val context: Context) {
             instances = state.instances.map { it.copy(stopping = true, starting = false) },
             configServer = state.configServer.copy(stopping = true, starting = false)
         )
-        scope.launch {
-            withContext(Dispatchers.IO) {
-                managerMutex.withLock { stopManagerBlocking() }
-            }
-            state = state.copy(
-                instances = emptyList(),
-                configServer = state.configServer.copy(
-                    pid = 0,
-                    running = false,
-                    starting = false,
-                    stopping = false,
-                    connected = false,
-                    managedNetworks = emptyList()
+        launchCommand {
+            runCatching {
+                withContext(Dispatchers.IO) { managerMutex.withLock { stopManagerBlocking() } }
+            }.onSuccess {
+                state = state.copy(managerError = "", instances = emptyList(),
+                    configServer = state.configServer.copy(pid = 0, running = false, starting = false,
+                        stopping = false, connected = false, managedNetworks = emptyList())
                 )
-            )
-            AppDiagnostics.event("root", "shared manager stopped")
+                AppDiagnostics.event("root", "shared manager stopped")
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                state = state.copy(managerError = "停止 Core 失败：${error.message}",
+                    instances = state.instances.map { it.copy(stopping = false) },
+                    configServer = state.configServer.copy(stopping = false))
+                AppDiagnostics.error("root", "shared manager stop failed", error)
+            }
         }
     }
 
     fun startConfigServer(settings: AppSettings) {
         val current = state.configServer
         if (current.running || current.starting || current.stopping) return
+        waitingSince = SystemClock.elapsedRealtime()
         state = state.copy(
             configServer = current.copy(
                 starting = true,
@@ -317,7 +352,7 @@ class RootTierController(private val context: Context) {
                 logs = listOf("正在把配置服务器接入共享 manager")
             )
         )
-        scope.launch {
+        launchCommand {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     managerMutex.withLock { startConfigServerBlocking(settings) }
@@ -346,7 +381,7 @@ class RootTierController(private val context: Context) {
         val current = state.configServer
         if (!current.running && !current.starting && !current.stopping) return
         state = state.copy(configServer = current.copy(stopping = true, starting = false))
-        scope.launch {
+        launchCommand {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
                     managerMutex.withLock { stopConfigServerBlocking() }
@@ -570,6 +605,7 @@ class RootTierController(private val context: Context) {
             }
         }
         val result = RootManager.su(command, timeoutMs = 20000)
+        lastProcessProbe = -10_000L
         if (!result.success) {
             AppDiagnostics.error("root", "shared manager start command failed: ${result.output.takeLast(1200)}")
             throw IllegalStateException(managerError(result, "共享 manager 启动失败"))
@@ -601,8 +637,12 @@ class RootTierController(private val context: Context) {
             append(' ')
             append(shq(managerPidFile.absolutePath))
         }
-        RootManager.su(command, timeoutMs = 12000)
+        val result = RootManager.su(command, timeoutMs = 12000)
+        check(result.success) { result.output.ifBlank { "无法停止 Core 进程" } }
         managerPidFile.delete()
+        cachedManagerPid = 0
+        lastProcessProbe = -10_000L
+        observedManager = false
     }
 
     private fun applyRootRouting(snapshot: ManagerSnapshot) {
@@ -685,52 +725,64 @@ class RootTierController(private val context: Context) {
         value.trim().substringBefore("/")
 
     private suspend fun pollLoop() {
-        while (true) {
+        while (scope.isActive) {
             refreshStates()
-            delay(if (state.instances.any { it.localCidr.isBlank() } || state.configServer.starting) 1000 else 3000)
+            val active = state.instances.any { it.running || it.starting } || state.configServer.running || state.configServer.starting
+            val waiting = state.instances.any { it.running && it.localCidr.isBlank() } || state.configServer.starting
+            val interval = PollingPolicy.root(pollForeground, pollVisible, active, waiting,
+                SystemClock.elapsedRealtime() - waitingSince, pollFailures)
+            withTimeoutOrNull(interval) { pollWakeup.receive() }
         }
     }
 
     private suspend fun refreshStates() {
-        if (!managerPidFile.exists() && state.instances.isEmpty() && !state.configServer.running) return
+        // Commands publish their own result. Do not overwrite a pending start/stop
+        // with a snapshot taken just before that command obtained the manager lock.
+        if (commandCount > 0 || state.instances.any { it.starting || it.stopping } || state.configServer.starting || state.configServer.stopping) return
+        if (!managerPidFile.exists() && state.instances.none { it.running } && !state.configServer.running) return
+        val revision = commandRevision
         val result = runCatching {
             withContext(Dispatchers.IO) {
                 managerMutex.withLock {
-                    if (!managerAlive()) {
-                        removeRootRouting()
-                        null
-                    } else {
-                        val options = loadManagerOptions()
-                            ?: optionsFromSettings(store.loadSettings(), enabled = false)
-                        val snapshot = queryManagerSnapshot()
-                        val refreshed = refreshedState(snapshot, options)
-                        applyRootRouting(snapshot)
-                        refreshed
-                    }
+                    // A successful persistent RPC is already a health check. No su
+                    // process or /proc discovery is needed on the normal polling path.
+                    val options = loadManagerOptions()
+                        ?: optionsFromSettings(store.loadSettings(), enabled = false)
+                    val snapshot = queryManagerSnapshot()
+                    val refreshed = refreshedState(snapshot, options)
+                    applyRootRouting(snapshot)
+                    refreshed
                 }
             }
         }
+        if (revision != commandRevision || commandCount > 0) return
         result.onSuccess { refreshed ->
-            if (refreshed == null) {
-                val wasExpected = state.instances.any { it.stopping } || state.configServer.stopping
-                state = state.copy(
-                    managerError = if (wasExpected) "" else "本地 Core 已退出",
-                    instances = state.instances.filterNot { it.stopping }.map {
-                        it.copy(running = false, starting = false, error = "本地 Core 已退出")
-                    },
-                    configServer = RootConfigServerState(serverUrl = store.loadSettings().configServerUrl)
-
-                )
-            } else {
-                state = state.copy(
-                    managerError = "",
-                    instances = refreshed.instances,
-                    configServer = refreshed.configServer
-                )
-            }
+            pollFailures = 0
+            observedManager = true
+            state = state.copy(managerError = "", instances = refreshed.instances, configServer = refreshed.configServer)
         }.onFailure { error ->
+            if (error is CancellationException) throw error
+            pollFailures++
+            val probe = runCatching { withContext(Dispatchers.IO) { managerMutex.withLock { managerPid(force = true) } } }
+            probe.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            if (revision != commandRevision || commandCount > 0) return
             Log.w(TAG, "Root manager refresh failed", error)
-            state = state.copy(managerError = error.message ?: "本地 Core 状态读取失败")
+            if (probe.getOrNull() == 0L) {
+                val unexpected = observedManager && (state.instances.any { it.running } || state.configServer.running)
+                val message = if (unexpected) "本地 Core 已退出（进程已不存在，请查看核心日志）" else ""
+                withContext(Dispatchers.IO) { managerMutex.withLock {
+                    if (revision == commandRevision) removeRootRouting()
+                } }
+                if (revision != commandRevision || commandCount > 0) return
+                observedManager = false
+                state = state.copy(managerError = message,
+                    instances = state.instances.map { it.copy(running = false, starting = false, error = message.ifBlank { it.error }) },
+                    configServer = RootConfigServerState(serverUrl = state.configServer.serverUrl))
+            } else {
+                val message = if (probe.isFailure) "无法确认 Core 状态：${probe.exceptionOrNull()?.message}" else
+                    "Core 进程仍在，状态暂时不可用：${error.message ?: "RPC 查询失败"}"
+                state = state.copy(managerError = message)
+            }
         }
     }
 
@@ -741,6 +793,7 @@ class RootTierController(private val context: Context) {
         }
         val root = parseJsonOutput(result.output)
             ?: throw IllegalStateException("manager 返回了无效状态")
+        observedManager = true
         val ids = root.optJSONArray("instance_ids")?.toStringList().orEmpty().toSet()
         val metas = LinkedHashMap<String, ManagerInstanceMeta>()
         val metaArray = root.optJSONArray("metas") ?: JSONArray()
@@ -763,7 +816,7 @@ class RootTierController(private val context: Context) {
     }
 
     private fun refreshedState(snapshot: ManagerSnapshot, options: ManagerOptions): RefreshedState {
-        val pid = managerPid()
+        val pid = runCatching { managerPidFile.readText().trim().toLong() }.getOrDefault(cachedManagerPid)
         val configs = store.loadConfigs().associateBy { it.id }
         val localMeta = loadLocalMetadata().toMutableMap()
         configs.values.forEach { config ->
@@ -1000,33 +1053,19 @@ class RootTierController(private val context: Context) {
         return "$fallback：${output.ifBlank { log }.ifBlank { "未知错误" }}"
     }
 
-    private fun managerAlive(): Boolean = isAlive(managerPid())
+    private fun managerAlive(): Boolean = managerPid() > 0
 
-    private fun managerPid(): Long {
-        val stored = runCatching { managerPidFile.readText().trim().toLong() }.getOrDefault(0)
-        if (isAlive(stored)) return stored
-        val discovered = discoverManagerPid()
-        if (discovered > 0) {
-            runCatching { managerPidFile.writeText(discovered.toString()) }
-            AppDiagnostics.info("root", "recovered shared manager pid=$discovered")
-        }
-        return discovered
-    }
-
-    private fun discoverManagerPid(): Long {
-        val command = buildString {
-            append("core=\u0024(readlink -f ")
-            append(shq(coreManager.coreFile.absolutePath))
-            append("); for proc in /proc/[0-9]*; do ")
-            append("exe=\u0024(readlink -f \"\u0024proc/exe\" 2>/dev/null); ")
-            append("[ \"\u0024exe\" = \"\u0024core\" ] || continue; ")
-            append("echo \u0024{proc##*/}; exit 0; ")
-            append("done; exit 1")
-        }
-        val result = RootManager.su(command, timeoutMs = 5000)
-        return if (result.success) result.output.lineSequence()
-            .mapNotNull { it.trim().toLongOrNull() }
-            .firstOrNull() ?: 0 else 0
+    private fun managerPid(force: Boolean = false): Long {
+        if (!coreManager.coreFile.exists()) return 0
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastProcessProbe < 2_000) return cachedManagerPid
+        val command = listOf("sh", scriptFile.absolutePath, "probe", coreManager.coreFile.absolutePath,
+            managerLogFile.absolutePath, managerPidFile.absolutePath, configsDir.absolutePath, "1")
+            .joinToString(" ", transform = ::shq)
+        val pid = RootProcessStatus.parse(RootManager.su(command, timeoutMs = 8000))
+        cachedManagerPid = pid
+        lastProcessProbe = now
+        return pid
     }
 
     private fun isAlive(pid: Long): Boolean {
@@ -1118,9 +1157,9 @@ class RootTierController(private val context: Context) {
             .getOrDefault("")
             .lineSequence()
             .filter { it.isNotBlank() }
-            .map { LogTime.normalize(redactConfigServerToken(it, rawUrl, resolvedUrl)) }
             .toList()
             .takeLast(400)
+            .map { LogTime.normalize(redactConfigServerToken(it, rawUrl, resolvedUrl)) }
     }
 
     private fun filteredCoreLogs(logs: List<String>): List<String> = when (
@@ -1283,6 +1322,7 @@ class RootTierController(private val context: Context) {
     )
 
     companion object {
+        private val sharedManagerMutex = Mutex()
         private const val TAG = "MoonTierRoot"
         private val IMPORTANT_CORE_LOG = Regex(
             "error|warn|fail|panic|closed|stop|disconnect|exit|timeout",
