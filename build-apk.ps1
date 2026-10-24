@@ -6,8 +6,9 @@ $repoRoot = $PSScriptRoot
 $projectDir = $repoRoot
 
 $javaCandidates = @(
-    (Join-Path $repoRoot '.build-tools\jdk17\jdk-17.0.16+8'),
-    $env:JAVA_HOME
+    'E:\DevTools\Java\jdk-17.0.16+8',
+    $env:JAVA_HOME,
+    (Join-Path $repoRoot '.build-tools\jdk17\jdk-17.0.16+8')
 )
 $javaHome = $null
 foreach ($cand in $javaCandidates) {
@@ -19,8 +20,8 @@ foreach ($cand in $javaCandidates) {
 
 $sdkCandidates = @(
     'E:\DevTools\Android\android-sdk',
-    (Join-Path $repoRoot '.build-tools\android-sdk'),
-    $env:ANDROID_HOME
+    $env:ANDROID_HOME,
+    (Join-Path $repoRoot '.build-tools\android-sdk')
 )
 $androidSdk = $null
 foreach ($cand in $sdkCandidates) {
@@ -31,8 +32,6 @@ foreach ($cand in $sdkCandidates) {
 }
 
 $gradleCandidates = @(
-    (Join-Path $repoRoot '.build-tools\gradle-9.8.0\bin\gradle.bat'),
-    (Join-Path $repoRoot '.build-tools\gradle-9.3.1\bin\gradle.bat'),
     'E:\DevTools\Gradle\gradle-9.8.0\bin\gradle.bat',
     'E:\DevTools\Gradle\bin\gradle.bat'
 )
@@ -43,6 +42,8 @@ $cmdGradle = Get-Command gradle.bat -ErrorAction SilentlyContinue
 if ($cmdGradle) {
     $gradleCandidates += $cmdGradle.Source
 }
+$gradleCandidates += (Join-Path $repoRoot '.build-tools\gradle-9.8.0\bin\gradle.bat')
+
 $gradle = $null
 foreach ($cand in $gradleCandidates) {
     if ($cand -and (Test-Path -LiteralPath $cand)) {

@@ -140,7 +140,7 @@ Android 工程位于仓库根目录。
 gradle --no-daemon :app:assembleDebug
 ```
 
-仓库根目录的 `build-apk.ps1` 可使用 `.build-tools` 中的本地工具链构建 APK，并在 `.build-tools/artifacts/` 下生成包含版本号和 Git 短哈希的文件名：
+仓库根目录的 `build-apk.ps1` 可自动检测本地工具链构建 APK，并在 `.build-tools/artifacts/` 下生成包含版本号和 Git 短哈希的文件名：
 
 ```powershell
 .\build-apk.ps1
