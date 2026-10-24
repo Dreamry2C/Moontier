@@ -421,3 +421,52 @@ fun serverNameFromAddress(address: String): String {
     }
     return host.ifBlank { "EasyTier 服务器" }
 }
+
+fun normalizeServerAddress(raw: String): String {
+    val trimmed = raw.trim().replace('\uFF1A', ':')
+    if (trimmed.isEmpty()) return ""
+
+    val scheme: String
+    val rest: String
+    val schemeIndex = trimmed.indexOf("://")
+    if (schemeIndex >= 0) {
+        scheme = trimmed.substring(0, schemeIndex).trim().ifEmpty { "tcp" }
+        rest = trimmed.substring(schemeIndex + 3).trim()
+    } else {
+        scheme = "tcp"
+        rest = trimmed
+    }
+
+    if (rest.isEmpty()) return "$scheme://"
+
+    val normalizedAddress = if (rest.startsWith("[")) {
+        val closingBracket = rest.indexOf(']')
+        if (closingBracket >= 0) {
+            val afterBracket = rest.substring(closingBracket + 1)
+            if (afterBracket.startsWith(":") && afterBracket.length > 1) {
+                rest
+            } else {
+                "$rest:11010"
+            }
+        } else {
+            if (rest.contains(":")) rest else "$rest:11010"
+        }
+    } else {
+        val colonCount = rest.count { it == ':' }
+        if (colonCount == 0) {
+            "$rest:11010"
+        } else if (colonCount == 1) {
+            val parts = rest.split(':')
+            val portPart = parts.getOrNull(1)?.trim() ?: ""
+            if (portPart.isEmpty()) {
+                "${parts[0]}:11010"
+            } else {
+                rest
+            }
+        } else {
+            "[$rest]:11010"
+        }
+    }
+
+    return "$scheme://$normalizedAddress"
+}

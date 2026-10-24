@@ -4,10 +4,53 @@ param()
 $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 $projectDir = $repoRoot
-$javaHome = Join-Path $repoRoot '.build-tools\jdk17\jdk-17.0.16+8'
-$androidSdk = Join-Path $repoRoot '.build-tools\android-sdk'
-$gradle = Join-Path $repoRoot '.build-tools\gradle-9.3.1\bin\gradle.bat'
-$signer = Join-Path $androidSdk 'build-tools\36.0.0\apksigner.bat'
+
+$javaCandidates = @(
+    (Join-Path $repoRoot '.build-tools\jdk17\jdk-17.0.16+8'),
+    $env:JAVA_HOME
+)
+$javaHome = $null
+foreach ($cand in $javaCandidates) {
+    if ($cand -and (Test-Path -LiteralPath (Join-Path $cand 'bin\keytool.exe'))) {
+        $javaHome = $cand
+        break
+    }
+}
+
+$sdkCandidates = @(
+    'E:\DevTools\Android\android-sdk',
+    (Join-Path $repoRoot '.build-tools\android-sdk'),
+    $env:ANDROID_HOME
+)
+$androidSdk = $null
+foreach ($cand in $sdkCandidates) {
+    if ($cand -and (Test-Path -LiteralPath (Join-Path $cand 'build-tools\36.0.0\apksigner.bat'))) {
+        $androidSdk = $cand
+        break
+    }
+}
+
+$gradleCandidates = @(
+    (Join-Path $repoRoot '.build-tools\gradle-9.8.0\bin\gradle.bat'),
+    (Join-Path $repoRoot '.build-tools\gradle-9.3.1\bin\gradle.bat'),
+    'E:\DevTools\Gradle\gradle-9.8.0\bin\gradle.bat',
+    'E:\DevTools\Gradle\bin\gradle.bat'
+)
+if ($env:GRADLE_HOME) {
+    $gradleCandidates += (Join-Path $env:GRADLE_HOME 'bin\gradle.bat')
+}
+$cmdGradle = Get-Command gradle.bat -ErrorAction SilentlyContinue
+if ($cmdGradle) {
+    $gradleCandidates += $cmdGradle.Source
+}
+$gradle = $null
+foreach ($cand in $gradleCandidates) {
+    if ($cand -and (Test-Path -LiteralPath $cand)) {
+        $gradle = $cand
+        break
+    }
+}
+$signer = if ($androidSdk) { Join-Path $androidSdk 'build-tools\36.0.0\apksigner.bat' } else { $null }
 $keyStore = Join-Path $env:USERPROFILE '.android\debug.keystore'
 # This public certificate is the signing identity of the published 1.2.4 APK.
 $expectedCertificate = '8e967c79287350c333095b15a088f17303b65411cea392551c2820c0d7977b4a'
@@ -22,6 +65,9 @@ $env:JAVA_HOME = $javaHome
 $env:ANDROID_HOME = $androidSdk
 $env:ANDROID_SDK_ROOT = $androidSdk
 $env:Path = "$(Join-Path $javaHome 'bin');$(Join-Path $androidSdk 'platform-tools');$env:Path"
+if (-not $env:GRADLE_USER_HOME -and (Test-Path 'E:\DevTools\Gradle\user-home')) {
+    $env:GRADLE_USER_HOME = 'E:\DevTools\Gradle\user-home'
+}
 
 # Fail before Gradle can generate a different debug key. This is the standard
 # Android debug password, not a release credential.

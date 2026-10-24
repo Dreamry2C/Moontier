@@ -132,7 +132,7 @@ Android 工程位于仓库根目录。
 - Android SDK 36
 - Android NDK `27.2.12479018`
 - CMake 3.22.1
-- Gradle 9.3.1
+- Gradle 9.8
 
 项目暂未提供 Gradle Wrapper。准备好本地工具链后，在 Android 工程目录执行：
 

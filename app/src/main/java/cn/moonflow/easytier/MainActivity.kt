@@ -1,4 +1,4 @@
-﻿package cn.moonflow.easytier
+package cn.moonflow.easytier
 
 import android.app.Activity
 import android.content.Intent
@@ -66,6 +66,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -120,6 +121,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -127,6 +129,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -1596,6 +1599,7 @@ private fun ServersPage(
                             values = userServers.map { it.address },
                             placeholder = "tcp://server.example.com:11010",
                             palette = palette,
+                            transformOnBlur = ::normalizeServerAddress,
                             onValues = { values ->
                                 onSaveUserServers(
                                     values.map { address ->
@@ -2045,7 +2049,8 @@ private fun ConfigEditorScreenV2(
     fun saveCurrentConfig() {
         val target = if (rawTomlDirty) parseRawTomlForEditor() else cfg
         if (target != null) {
-            onSave(target)
+            val normalizedTarget = target.copy(peerUrls = target.peerUrls.map(::normalizeServerAddress).cleanItems())
+            onSave(normalizedTarget)
             rawTomlDirty = false
         }
     }
@@ -2083,7 +2088,9 @@ private fun ConfigEditorScreenV2(
                 QTextField(cfg.label, "配置名称", palette) { cfg = cfg.copy(label = it) }
                 Spacer(Modifier.height(16.dp))
                 ActionBar(palette) {
-                    QButton("保存", palette, Modifier.weight(1f), compact = true, icon = Icons.Rounded.Check) { onSave(cfg) }
+                    QButton("保存", palette, Modifier.weight(1f), compact = true, icon = Icons.Rounded.Check) {
+                        onSave(cfg.copy(peerUrls = cfg.peerUrls.map(::normalizeServerAddress).cleanItems()))
+                    }
                     QButton("不保存", palette, Modifier.weight(1f), primary = false, compact = true) { onBack() }
                     QButton("导出", palette, Modifier.weight(1f), primary = false, compact = true) { onExport(cfg) }
                 }
@@ -2135,7 +2142,8 @@ private fun ConfigEditorScreenV2(
                     title = "服务器列表",
                     values = cfg.peerUrls,
                     placeholder = "tcp://server.example.com:11010",
-                    palette = palette
+                    palette = palette,
+                    transformOnBlur = ::normalizeServerAddress
                 ) {
                     cfg = cfg.copy(peerUrls = it)
                 }
@@ -2787,6 +2795,8 @@ private fun QTextField(
     password: Boolean = false,
     singleLine: Boolean = true,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
+    onFocusLost: (() -> Unit)? = null,
     onValueChange: (String) -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -2805,11 +2815,17 @@ private fun QTextField(
             onValueChange = onValueChange,
             singleLine = singleLine,
             keyboardOptions = keyboardOptions,
+            keyboardActions = keyboardActions,
             visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
             textStyle = TextStyle(color = palette.text, fontSize = 14.sp),
             modifier = Modifier
                 .fillMaxWidth()
-                .onFocusChanged { focused = it.isFocused }
+                .onFocusChanged { focusState ->
+                    if (focused && !focusState.isFocused) {
+                        onFocusLost?.invoke()
+                    }
+                    focused = focusState.isFocused
+                }
         )
         val hintAlpha by animateFloatAsState(if (value.isEmpty() && !focused) 1f else 0f, tween(140), label = "hint")
         if (hintAlpha > 0.01f) {
@@ -2966,9 +2982,11 @@ private fun ListEditor(
     quickAddLabel: String? = null,
     secondaryQuickAdd: List<String> = emptyList(),
     secondaryQuickAddLabel: String? = null,
+    transformOnBlur: ((String) -> String)? = null,
     onValues: (List<String>) -> Unit
 ) {
     var local by remember(values) { mutableStateOf(values.ifEmpty { emptyList() }) }
+    val focusManager = LocalFocusManager.current
     val quickActions = buildList {
         if (quickAddLabel != null || quickAdd.isNotEmpty()) add((quickAddLabel ?: "收藏") to quickAdd)
         if (secondaryQuickAddLabel != null || secondaryQuickAdd.isNotEmpty()) add((secondaryQuickAddLabel ?: "官方") to secondaryQuickAdd)
@@ -2990,6 +3008,19 @@ private fun ListEditor(
                     placeholder = placeholder,
                     palette = palette,
                     modifier = Modifier.weight(1f),
+                    keyboardOptions = if (transformOnBlur != null) KeyboardOptions(imeAction = ImeAction.Done) else KeyboardOptions.Default,
+                    keyboardActions = KeyboardActions(onDone = {
+                        focusManager.clearFocus()
+                    }),
+                    onFocusLost = {
+                        if (transformOnBlur != null && value.isNotBlank()) {
+                            val transformed = transformOnBlur(value)
+                            if (transformed != value) {
+                                local = local.replaceAt(index, transformed)
+                                onValues(local.cleanItems())
+                            }
+                        }
+                    },
                     onValueChange = {
                         local = local.replaceAt(index, it)
                         onValues(local.cleanItems())

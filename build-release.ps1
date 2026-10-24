@@ -1,26 +1,76 @@
 [CmdletBinding()]
 param(
-    [string]$SourceDir = $PSScriptRoot,
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot '.build-tools\artifacts')
+    [string]$SourceDir,
+    [string]$OutputDirectory
 )
 
 $ErrorActionPreference = 'Stop'
+$repoRoot = $PSScriptRoot
+if (-not $SourceDir) { $SourceDir = $repoRoot }
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repoRoot '.build-tools\artifacts' }
+
 $projectDir = (Resolve-Path -LiteralPath $SourceDir).Path
-$javaDir = Join-Path $PSScriptRoot '.build-tools\jdk17\jdk-17.0.16+8'
-$sdk = Join-Path $PSScriptRoot '.build-tools\android-sdk'
-$gradle = Join-Path $PSScriptRoot '.build-tools\gradle-9.3.1\bin\gradle.bat'
-$buildTools = Join-Path $sdk 'build-tools\36.0.0'
+
+$javaCandidates = @(
+    (Join-Path $repoRoot '.build-tools\jdk17\jdk-17.0.16+8'),
+    $env:JAVA_HOME
+)
+$javaDir = $null
+foreach ($cand in $javaCandidates) {
+    if ($cand -and (Test-Path -LiteralPath (Join-Path $cand 'bin\keytool.exe'))) {
+        $javaDir = $cand
+        break
+    }
+}
+
+$sdkCandidates = @(
+    'E:\DevTools\Android\android-sdk',
+    (Join-Path $repoRoot '.build-tools\android-sdk'),
+    $env:ANDROID_HOME
+)
+$sdk = $null
+foreach ($cand in $sdkCandidates) {
+    if ($cand -and (Test-Path -LiteralPath (Join-Path $cand 'build-tools\36.0.0\apksigner.bat'))) {
+        $sdk = $cand
+        break
+    }
+}
+
+$gradleCandidates = @(
+    (Join-Path $repoRoot '.build-tools\gradle-9.8.0\bin\gradle.bat'),
+    (Join-Path $repoRoot '.build-tools\gradle-9.3.1\bin\gradle.bat'),
+    'E:\DevTools\Gradle\gradle-9.8.0\bin\gradle.bat',
+    'E:\DevTools\Gradle\bin\gradle.bat'
+)
+if ($env:GRADLE_HOME) {
+    $gradleCandidates += (Join-Path $env:GRADLE_HOME 'bin\gradle.bat')
+}
+$cmdGradle = Get-Command gradle.bat -ErrorAction SilentlyContinue
+if ($cmdGradle) {
+    $gradleCandidates += $cmdGradle.Source
+}
+$gradle = $null
+foreach ($cand in $gradleCandidates) {
+    if ($cand -and (Test-Path -LiteralPath $cand)) {
+        $gradle = $cand
+        break
+    }
+}
+$buildTools = if ($sdk) { Join-Path $sdk 'build-tools\36.0.0' } else { $null }
 $keyStore = Join-Path $env:USERPROFILE '.android\debug.keystore'
 # Preserve the signing identity used by existing public APKs, including v1.2.4.
 # Release/debug is a build variant; it does not require changing the certificate.
 $expectedCertificate = '8e967c79287350c333095b15a088f17303b65411cea392551c2820c0d7977b4a'
 
 foreach ($required in @((Join-Path $projectDir 'settings.gradle'), $javaDir, $sdk, $gradle, $buildTools, $keyStore)) {
-    if (-not (Test-Path -LiteralPath $required)) { throw "Missing build dependency: $required" }
+    if (-not $required -or -not (Test-Path -LiteralPath $required)) { throw "Missing build dependency: $required" }
 }
 $env:JAVA_HOME = $javaDir
 $env:ANDROID_HOME = $sdk
 $env:ANDROID_SDK_ROOT = $sdk
+if (-not $env:GRADLE_USER_HOME -and (Test-Path 'E:\DevTools\Gradle\user-home')) {
+    $env:GRADLE_USER_HOME = 'E:\DevTools\Gradle\user-home'
+}
 $certificate = & (Join-Path $javaDir 'bin\keytool.exe') -exportcert -rfc -alias androiddebugkey -keystore $keyStore -storepass android 2>$null
 if ($LASTEXITCODE -ne 0) { throw 'Unable to read the existing signing certificate' }
 $bytes = [Convert]::FromBase64String(($certificate | Where-Object { $_ -notmatch '^-----' }) -join '')
